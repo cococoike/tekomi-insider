@@ -3,7 +3,8 @@ import { subscribeRoom, saveRoom, loadRoom, loadLeaderboard, saveLeaderboard } f
 import { pickWord } from "./lib/words";
 
 const genId = () => Math.random().toString(36).slice(2, 11);
-const genCode = () => Math.random().toString(36).slice(2, 7).toUpperCase();
+const genCode = () => String(Math.floor(Math.random() * 1000)).padStart(3, "0");
+const NONE_ID = "__none__";
 const enc = (t) => { try { return btoa(unescape(encodeURIComponent(t))); } catch { return btoa(t); } };
 const dec = (s) => { try { return decodeURIComponent(escape(atob(s))); } catch { return ""; } };
 const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "むずかしめ"];
@@ -87,36 +88,58 @@ export default function TekomiInsider() {
 
   const [cat, setCat] = useState("おまかせ");
   const [manualWord, setManualWord] = useState("");
+  const [peaceMode, setPeaceMode] = useState(false);
 
   // ── 採点 ──
   const finalize = useCallback(async (code, data) => {
     if (data.scored) return data;
-    const insiderId = dec(data.insiderEnc || "");
+    const isPeace = !!data.isPeaceVillage;
+    const insiderId = isPeace ? null : dec(data.insiderEnc || "");
     const scores = { ...(data.scores || {}) };
     const add = (name, pts) => { scores[name] = (scores[name] || 0) + pts; };
     let outcome;
     let winners = [];
 
-    if (!data.wordGuessed) {
-      const ins = data.players.find((p) => p.id === insiderId);
-      if (ins) { add(ins.name, 1); winners = [ins.name]; }
-      outcome = "timeout";
-    } else {
-      const vc = {};
-      Object.values(data.votes || {}).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
-      const maxV = Math.max(0, ...Object.values(vc));
-      const top = Object.entries(vc).filter(([, v]) => v === maxV).map(([k]) => k);
-      const caught = top.length === 1 && top[0] === insiderId;
-      if (caught) {
-        data.players.forEach((p) => {
-          if (p.id === data.masterId) { add(p.name, 1); winners.push(p.name); }
-          else if (p.id !== insiderId) { add(p.name, 2); winners.push(p.name); }
-        });
-        outcome = "commons";
+    if (isPeace) {
+      // 平和村ルート
+      if (!data.wordGuessed) {
+        outcome = "peace_timeout";
       } else {
+        const vc = {};
+        Object.values(data.votes || {}).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
+        const maxV = Math.max(0, ...Object.values(vc));
+        const top = Object.entries(vc).filter(([, v]) => v === maxV).map(([k]) => k);
+        const villageWon = top.length === 1 && top[0] === NONE_ID;
+        if (villageWon) {
+          data.players.forEach((p) => { add(p.name, 1); winners.push(p.name); });
+          outcome = "peace_win";
+        } else {
+          outcome = "peace_lose";
+        }
+      }
+    } else {
+      // 通常ルート
+      if (!data.wordGuessed) {
         const ins = data.players.find((p) => p.id === insiderId);
-        if (ins) { add(ins.name, 3); winners = [ins.name]; }
-        outcome = "insider";
+        if (ins) { add(ins.name, 1); winners = [ins.name]; }
+        outcome = "timeout";
+      } else {
+        const vc = {};
+        Object.values(data.votes || {}).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
+        const maxV = Math.max(0, ...Object.values(vc));
+        const top = Object.entries(vc).filter(([, v]) => v === maxV).map(([k]) => k);
+        const caught = top.length === 1 && top[0] === insiderId;
+        if (caught) {
+          data.players.forEach((p) => {
+            if (p.id === data.masterId) { add(p.name, 1); winners.push(p.name); }
+            else if (p.id !== insiderId) { add(p.name, 2); winners.push(p.name); }
+          });
+          outcome = "commons";
+        } else {
+          const ins = data.players.find((p) => p.id === insiderId);
+          if (ins) { add(ins.name, 3); winners = [ins.name]; }
+          outcome = "insider";
+        }
       }
     }
 
@@ -141,7 +164,7 @@ export default function TekomiInsider() {
     const unsub = subscribeRoom(roomCode, async (data) => {
       const cur = screenRef.current;
       if (cur === "home" || cur === "lb" || !data) return;
-      if (data.insiderEnc) setIsInsider(dec(data.insiderEnc) === myId);
+      setIsInsider(data.insiderEnc ? dec(data.insiderEnc) === myId : false);
 
       if (data.phase === "vote") {
         const voters = data.players.filter((p) => p.id !== data.masterId);
@@ -189,7 +212,7 @@ export default function TekomiInsider() {
   const doJoin = async () => {
     if (!fName.trim() || !fCode.trim()) return setErr("名前とコードを入れてね");
     setLoading(true); setErr("");
-    const code = fCode.trim().toUpperCase();
+    const code = fCode.trim().replace(/\D/g, "").padStart(3, "0");
     const data = await loadRoom(code);
     if (!data) { setErr("ルームが見つかりません"); setLoading(false); return; }
     if (data.phase !== "lobby") { setErr("ラウンド進行中です。少し待ってね"); setLoading(false); return; }
@@ -218,8 +241,11 @@ export default function TekomiInsider() {
     if (!room?.wordEnc) return setErr("お題を決めてね");
     if (room.players.length < 3) return setErr("3人以上必要です");
     const nonMasters = room.players.filter((p) => p.id !== myId);
-    const insider = nonMasters[Math.floor(Math.random() * nonMasters.length)];
-    const updated = { ...room, phase: "playing", insiderEnc: enc(insider.id),
+    const isPeaceVillage = peaceMode && Math.random() < 0.2;
+    const insider = isPeaceVillage ? null : nonMasters[Math.floor(Math.random() * nonMasters.length)];
+    const updated = { ...room, phase: "playing",
+      insiderEnc: insider ? enc(insider.id) : null,
+      isPeaceVillage,
       startTime: Date.now(), usedWords: [...(room.usedWords || []), dec(room.wordEnc)] };
     await saveRoom(roomCode, updated);
     setRoom(updated); setIsInsider(false); setTimeLeft(updated.duration); setS("reveal");
@@ -259,7 +285,7 @@ export default function TekomiInsider() {
 
   const doNextRound = async () => {
     const updated = { ...room, phase: "lobby", round: (room.round || 1) + 1,
-      wordEnc: null, insiderEnc: null, startTime: null, wordGuessed: false,
+      wordEnc: null, insiderEnc: null, isPeaceVillage: false, startTime: null, wordGuessed: false,
       votes: {}, qa: [], scored: false, outcome: null };
     await saveRoom(roomCode, updated);
     setRoom(updated); setRoleRevealed(false); setS("lobby");
@@ -302,8 +328,9 @@ export default function TekomiInsider() {
           <div style={St.card}>
             <span style={St.lbl}>ルームに参加</span>
             <input style={St.inp} placeholder="あなたの名前" value={fName} onChange={(e) => setFName(e.target.value)} maxLength={10} />
-            <input style={{ ...St.inp, letterSpacing: "8px", fontFamily: "monospace", fontSize: "24px", textAlign: "center" }}
-              placeholder="●●●●●" value={fCode} onChange={(e) => setFCode(e.target.value.toUpperCase())} maxLength={5} />
+            <input style={{ ...St.inp, letterSpacing: "8px", fontFamily: "monospace", fontSize: "32px", textAlign: "center" }}
+              placeholder="000" value={fCode} inputMode="numeric" pattern="[0-9]*"
+              onChange={(e) => setFCode(e.target.value.replace(/\D/g, "").slice(0, 3))} maxLength={3} />
             <button style={St.btn(C.text)} onClick={doJoin} disabled={loading}>{loading ? "…" : "参加する"}</button>
           </div>
           <button style={St.ghost} onClick={() => { setCreating(true); setErr(""); }}>ルームを作る（マスター）</button>
@@ -409,6 +436,17 @@ export default function TekomiInsider() {
                 <span style={{ fontFamily: SERIF, fontSize: "20px", color: C.gold }}>「{dec(room.wordEnc)}」</span>
               </div>
             )}
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px", padding: "10px 12px",
+              background: C.surf2, borderRadius: "3px", cursor: "pointer" }} onClick={() => setPeaceMode(v => !v)}>
+              <div style={{ width: "36px", height: "20px", borderRadius: "10px", position: "relative",
+                background: peaceMode ? C.green : C.muted, transition: "background 0.2s" }}>
+                <div style={{ position: "absolute", top: "3px", left: peaceMode ? "18px" : "3px", width: "14px", height: "14px",
+                  borderRadius: "50%", background: C.bg, transition: "left 0.2s" }} />
+              </div>
+              <span style={{ fontSize: "12px", color: peaceMode ? C.green : C.muted, letterSpacing: "1px" }}>
+                平和村モード（20%の確率でインサイダー不在）
+              </span>
+            </div>
             <button style={St.btn(wordSet && players.length >= 3 ? C.text : C.surf2, wordSet && players.length >= 3 ? C.bg : C.muted, "0")}
               onClick={doStart} disabled={!wordSet || players.length < 3}>
               {players.length < 3 ? `開始まであと${3 - players.length}名` : !wordSet ? "お題を決めてください" : "ラウンド開始"}
@@ -545,6 +583,7 @@ export default function TekomiInsider() {
 
   // ════ VOTE ════
   if (screen === "vote") {
+    const isPeace = !!room?.isPeaceVillage;
     const votable = (room?.players || []).filter((p) => p.id !== room?.masterId && p.id !== myId);
     const voteCount = Object.keys(room?.votes || {}).length;
     const totalVoters = (room?.players || []).filter((p) => p.id !== room?.masterId).length;
@@ -567,6 +606,8 @@ export default function TekomiInsider() {
             {votable.map((p) => (
               <button key={p.id} style={{ ...St.ghost, color: C.text, fontSize: "15px" }} onClick={() => doVote(p.id)}>{p.name}</button>
             ))}
+            <button style={{ ...St.ghost, color: C.green, fontSize: "15px", borderColor: C.green }}
+              onClick={() => doVote(NONE_ID)}>インサイダーはいない</button>
           </div>
         )}
       </div>
@@ -575,15 +616,24 @@ export default function TekomiInsider() {
 
   // ════ RESULT ════
   if (screen === "result") {
-    const insiderId = dec(room?.insiderEnc || "");
-    const insiderPlayer = room?.players?.find((p) => p.id === insiderId);
+    const isPeace = !!room?.isPeaceVillage;
+    const insiderId = isPeace ? null : dec(room?.insiderEnc || "");
+    const insiderPlayer = isPeace ? null : room?.players?.find((p) => p.id === insiderId);
     const word = dec(room?.wordEnc || "");
     const votes = room?.votes || {};
     const vc = {};
     Object.values(votes).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
     const oc = room?.outcome;
-    const title = oc === "commons" ? "コモン側の勝利" : oc === "insider" ? "インサイダーの勝利" : "時間切れ — 任務失敗";
-    const tcol = oc === "commons" ? C.green : C.red;
+    const titleMap = {
+      commons: "コモン側の勝利",
+      insider: "インサイダーの勝利",
+      timeout: "時間切れ — 任務失敗",
+      peace_win: "平和村 — 村の勝利",
+      peace_lose: "平和村 — 村の失敗",
+      peace_timeout: "時間切れ — 任務失敗",
+    };
+    const title = titleMap[oc] || "結果";
+    const tcol = (oc === "commons" || oc === "peace_win") ? C.green : C.red;
     return (
       <div style={St.page}>
         <Header sub={`ROUND ${room?.round || 1} 結果`} />
@@ -594,20 +644,28 @@ export default function TekomiInsider() {
           </div>
         </div>
 
-        <div style={{ ...St.card, textAlign: "center", border: `1px solid ${C.red}` }}>
-          <span style={St.lbl}>インサイダーの正体</span>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px" }}>
-            <Owl size={0.7} />
-            <span style={{ fontFamily: SERIF, fontSize: "26px", color: C.red }}>{insiderPlayer?.name || "?"}</span>
+        {isPeace ? (
+          <div style={{ ...St.card, textAlign: "center", border: `1px solid ${C.green}` }}>
+            <span style={St.lbl}>このラウンド</span>
+            <div style={{ fontFamily: SERIF, fontSize: "22px", color: C.green }}>平和村</div>
+            <div style={{ fontSize: "12px", color: C.muted, marginTop: "6px" }}>インサイダーはいなかった</div>
           </div>
-        </div>
+        ) : (
+          <div style={{ ...St.card, textAlign: "center", border: `1px solid ${C.red}` }}>
+            <span style={St.lbl}>インサイダーの正体</span>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px" }}>
+              <Owl size={0.7} />
+              <span style={{ fontFamily: SERIF, fontSize: "26px", color: C.red }}>{insiderPlayer?.name || "?"}</span>
+            </div>
+          </div>
+        )}
 
         <div style={St.card}>
           <span style={St.lbl}>得点</span>
           {(room?.players || []).map((p) => (
             <div key={p.id} style={{ display: "flex", alignItems: "baseline", padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
               <div style={{ flex: 1 }}>
-                <span style={{ color: p.id === insiderId ? C.red : p.id === room.masterId ? C.gold : C.text }}>
+                <span style={{ color: (!isPeace && p.id === insiderId) ? C.red : p.id === room.masterId ? C.gold : C.text }}>
                   {p.name}{p.id === myId ? "（あなた）" : ""}
                 </span>
                 {vc[p.id] ? <span style={{ fontSize: "11px", color: C.muted }}>　{vc[p.id]}票</span> : null}
