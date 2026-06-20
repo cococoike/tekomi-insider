@@ -49,9 +49,22 @@ const WORD_LIST = {
   ],
 };
 
-export function pickWord(category, usedWords = []) {
+// アダルトモード専用（下ネタ・きわどい単語）。身内クローズド前提。
+// 通常の「おまかせ」には絶対に混ざらない。
+const ADULT_LIST = [
+  "キス", "ハグ", "告白", "合コン", "ナンパ", "デート", "浮気", "元カノ", "元カレ", "片思い",
+  "ラブホテル", "お持ち帰り", "一夜限り", "夜の営み", "ベッドイン", "添い寝", "壁ドン", "あごクイ",
+  "下着", "ブラジャー", "パンツ", "ストッキング", "ガーター", "水着", "ビキニ", "ランジェリー",
+  "すっぴん", "谷間", "美脚", "うなじ", "二の腕", "色気", "セクシー", "むちむち", "ぽっちゃり",
+  "キスマーク", "ナイトキャップ", "王様ゲーム", "ちょい見せ", "胸チラ", "覗き見", "妄想", "据え膳",
+  "キャバクラ", "ホストクラブ", "ストリップ", "混浴", "コンドーム", "大人のおもちゃ", "グラビア", "下心",
+];
+
+export function pickWord(category, usedWords = [], adult = false) {
   let pool;
-  if (category === "おまかせ") {
+  if (adult) {
+    pool = ADULT_LIST;
+  } else if (category === "おまかせ") {
     pool = Object.values(WORD_LIST).flat();
   } else {
     pool = WORD_LIST[category] || Object.values(WORD_LIST).flat();
