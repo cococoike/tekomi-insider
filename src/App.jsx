@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { subscribeRoom, saveRoom, loadRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
+import { subscribeRoom, saveRoom, setRoomField, loadRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
 import { pickWord } from "./lib/words";
 import { sfxClick, sfxSelect, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
 
@@ -7,7 +7,7 @@ const genId = () => Math.random().toString(36).slice(2, 11);
 const NONE_ID = "__none__";
 const BOTTOM_ICON = "💩";
 
-// 累計ポイント順位フレア（1位🎤 / ビリ💩）。同点全員0なら付けない。
+// 累計ポイント順位フレア（1位👑 / ビリ💩・同点は全員に付与）。全員同点なら付けない。
 function computeFlair(players, board) {
   const flair = {};
   if (!players || players.length < 2) return flair;
@@ -15,7 +15,7 @@ function computeFlair(players, board) {
   const max = Math.max(...pts.map((x) => x.pt));
   const min = Math.min(...pts.map((x) => x.pt));
   if (max > min) {
-    pts.forEach((x) => { if (x.pt === max) flair[x.name] = "🎤"; else if (x.pt === min) flair[x.name] = BOTTOM_ICON; });
+    pts.forEach((x) => { if (x.pt === max) flair[x.name] = "👑"; else if (x.pt === min) flair[x.name] = BOTTOM_ICON; });
   }
   return flair;
 }
@@ -26,10 +26,9 @@ const enc = (t) => { try { return btoa(unescape(encodeURIComponent(t))); } catch
 const dec = (s) => { try { return decodeURIComponent(escape(atob(s))); } catch { return ""; } };
 const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "むずかしめ"];
 
-// 各オプションは独立ON/OFF。組み合わせOK（カオスONのとき平和村/フォロワーは自動無効）。
+// 各オプションは独立ON/OFF。組み合わせOK。
 const OPTS = [
-  { key: "peace",    label: "平和村",      emoji: "😇", desc: "20%でインサイダー不在。疑心暗鬼MAX", color: "#8a8a8a" },
-  { key: "chaos",    label: "カオス",      emoji: "🔥", desc: "10%でカオス発生！コモン1人、残り全員インサイダー", color: "#E53935" },
+  { key: "peace",    label: "平和村",      emoji: "😇", desc: "10%でインサイダー不在。疑心暗鬼MAX", color: "#8a8a8a" },
   { key: "adult",    label: "アダルト🔞", emoji: "🌶️", desc: "お題がきわどく…完全身内専用", color: "#a020e0" },
   { key: "follower", label: "フォロワー",  emoji: "🥷", desc: "6人以上で発動。インサイダーの隠れ味方が1人", color: "#7a2fa0" },
 ];
@@ -37,10 +36,9 @@ const OPTS = [
 const optsSummary = (r) => {
   if (!r) return "ふつう";
   const on = [];
-  if (r.chaos) on.push("カオス");
-  if (r.peace && !r.chaos) on.push("平和村");
+  if (r.peace) on.push("平和村");
   if (r.adult) on.push("アダルト");
-  if (r.follower && !r.chaos) on.push("フォロワー");
+  if (r.follower) on.push("フォロワー");
   return on.length ? on.join("＋") : "ふつう";
 };
 
@@ -250,7 +248,6 @@ export default function TekomiInsider() {
   const [isMaster, setIsMaster] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [isInsider, setIsInsider] = useState(false);
-  const [isLoneCommon, setIsLoneCommon] = useState(false);
   const [isFollower, setIsFollower] = useState(false);
   const [soundOn, setSoundOn] = useState(isSound());
   const [roomCode, setRoomCode] = useState("");
@@ -316,7 +313,7 @@ export default function TekomiInsider() {
       const key = `${room.round}-${room.outcome}`;
       if (resultPlayed.current !== key) {
         resultPlayed.current = key;
-        sfxResult(["commons", "peace_win", "chaos"].includes(room.outcome));
+        sfxResult(["commons", "peace_win"].includes(room.outcome));
       }
     }
   }, [screen, room?.outcome, room?.round]);
@@ -324,7 +321,6 @@ export default function TekomiInsider() {
   // ── 採点 ──
   const finalize = useCallback(async (code, data) => {
     if (data.scored) return data;
-    const isChaos = !!data.isChaosRound;
     const isPeace = !!data.isPeaceVillage;
     const insiderId = isPeace ? null : dec(data.insiderEnc || "");
     const followerId = dec(data.followerEnc || "");
@@ -333,12 +329,7 @@ export default function TekomiInsider() {
     let outcome;
     let winners = [];
 
-    if (isChaos) {
-      // カオス：コモン1人、残り全員インサイダー。
-      // ※採点ルールは相談中の暫定版：お題が当たれば参加者全員 +1pt。
-      if (data.wordGuessed) data.players.forEach((p) => { add(p.name, 1); winners.push(p.name); });
-      outcome = "chaos";
-    } else if (isPeace) {
+    if (isPeace) {
       // 平和村ルート
       if (!data.wordGuessed) {
         outcome = "peace_timeout";
@@ -411,11 +402,11 @@ export default function TekomiInsider() {
       setIsMaster(data.masterId === myId);
       setIsHost(data.hostId === myId);
       setIsInsider(data.insiderEnc ? dec(data.insiderEnc) === myId : false);
-      setIsLoneCommon(data.loneCommonEnc ? dec(data.loneCommonEnc) === myId : false);
       setIsFollower(data.followerEnc ? dec(data.followerEnc) === myId : false);
 
       if (data.phase === "vote") {
-        const voters = data.players.filter((p) => p.id !== data.masterId);
+        // マスターも投票する → 全員ぶん揃ったら開票
+        const voters = data.players;
         if (Object.keys(data.votes || {}).length >= voters.length && voters.length > 0 && !data.scored) {
           sfxDrumroll();
           const updated = await finalize(roomCode, data);
@@ -432,26 +423,39 @@ export default function TekomiInsider() {
       if (data.phase === "playing" && cur === "lobby") { setRoleRevealed(false); setS("reveal"); }
       if (data.phase === "vote" && (cur === "game" || cur === "reveal")) setS("vote");
       if (data.phase === "result" && cur !== "result") setS("result");
-      if (data.phase === "playing" && data.startTime) {
-        setTimeLeft(Math.max(0, data.duration - Math.floor((Date.now() - data.startTime) / 1000)));
+      // 残り時間はマスターが正。非マスターはマスターの配信値（timeLeft）を表示するだけ。
+      if (data.phase === "playing") {
+        if (data.masterId !== myId) {
+          const t = typeof data.timeLeft === "number"
+            ? data.timeLeft
+            : Math.max(0, (data.duration || 300) - Math.floor((Date.now() - (data.startTime || Date.now())) / 1000));
+          setTimeLeft(Math.max(0, t));
+        }
       }
     });
     return () => unsub();
   }, [roomCode, myId, finalize]);
 
+  // マスターだけが時計を進め、毎秒Firebaseへ配信（全員が同じ残り時間を見る）
+  const tlRef = useRef(0);
+  tlRef.current = timeLeft;
   useEffect(() => {
-    if (screen !== "game") return;
-    const id = setInterval(() => setTimeLeft((t) => Math.max(0, t - 1)), 1000);
+    if (screen !== "game" || !isMaster) return;
+    const id = setInterval(() => {
+      const n = Math.max(0, tlRef.current - 1);
+      setTimeLeft(n);
+      setRoomField(ROOM, "timeLeft", n);
+    }, 1000);
     return () => clearInterval(id);
-  }, [screen]);
+  }, [screen, isMaster]);
 
   // ── actions ──
   const freshRoom = (name, uid = myId) => ({
-    phase: "lobby", round: 1, peace: false, chaos: false, adult: false, follower: false, masterRule: "random",
+    phase: "lobby", round: 1, peace: false, adult: false, follower: false, masterRule: "random",
     hostId: uid, masterId: uid, wordEnc: null,
-    insiderEnc: null, loneCommonEnc: null, followerEnc: null, players: [{ id: uid, name }],
+    insiderEnc: null, followerEnc: null, players: [{ id: uid, name }],
     startTime: null, duration: 300, wordGuessed: false, votes: {}, qa: [], scores: {}, scored: false,
-    usedWords: [], isPeaceVillage: false, isChaosRound: false,
+    usedWords: [], isPeaceVillage: false,
   });
 
   const doEnter = async () => {
@@ -511,8 +515,10 @@ export default function TekomiInsider() {
 
   const doExtend = async () => {
     if (!room) return;
-    const u = { ...room, duration: (room.duration || 300) + 60 };
-    await saveRoom(ROOM, u); setRoom(u); setTimeLeft((t) => t + 60);
+    const n = tlRef.current + 60;
+    setTimeLeft(n);
+    await setRoomField(ROOM, "duration", (room.duration || 300) + 60);
+    await setRoomField(ROOM, "timeLeft", n); // 全員へ即同期
   };
 
   const setMasterRule = async (rule) => {
@@ -534,25 +540,19 @@ export default function TekomiInsider() {
     if (!room?.wordEnc) return setErr("お題を決めてね");
     if (room.players.length < 3) return setErr("3人以上ひつようだてこ");
     const nonMasters = room.players.filter((p) => p.id !== room.masterId);
-    let insiderEnc = null, loneCommonEnc = null, followerEnc = null, isPeaceVillage = false;
-    const isChaosRound = !!room.chaos && Math.random() < 0.1;
-    if (isChaosRound) {
-      const lone = nonMasters[Math.floor(Math.random() * nonMasters.length)];
-      loneCommonEnc = enc(lone.id);
-    } else {
-      isPeaceVillage = !!room.peace && Math.random() < 0.2;
-      const insider = isPeaceVillage ? null : nonMasters[Math.floor(Math.random() * nonMasters.length)];
-      insiderEnc = insider ? enc(insider.id) : null;
-      // フォロワー：6人以上＆インサイダー在のときだけ、インサイダー以外から1名
-      if (room.follower && insider && room.players.length >= 6) {
-        const pool = nonMasters.filter((p) => p.id !== insider.id);
-        if (pool.length) followerEnc = enc(pool[Math.floor(Math.random() * pool.length)].id);
-      }
+    let insiderEnc = null, followerEnc = null;
+    const isPeaceVillage = !!room.peace && Math.random() < 0.1; // 平和村は10%
+    const insider = isPeaceVillage ? null : nonMasters[Math.floor(Math.random() * nonMasters.length)];
+    insiderEnc = insider ? enc(insider.id) : null;
+    // フォロワー：6人以上＆インサイダー在のときだけ、インサイダー以外から1名
+    if (room.follower && insider && room.players.length >= 6) {
+      const pool = nonMasters.filter((p) => p.id !== insider.id);
+      if (pool.length) followerEnc = enc(pool[Math.floor(Math.random() * pool.length)].id);
     }
-    const u = { ...room, phase: "playing", insiderEnc, loneCommonEnc, followerEnc, isPeaceVillage, isChaosRound,
-      startTime: Date.now(), usedWords: [...(room.usedWords || []), dec(room.wordEnc)] };
+    const u = { ...room, phase: "playing", insiderEnc, followerEnc, isPeaceVillage,
+      startTime: Date.now(), timeLeft: room.duration || 300, usedWords: [...(room.usedWords || []), dec(room.wordEnc)] };
     await saveRoom(ROOM, u);
-    setRoom(u); setIsInsider(false); setIsLoneCommon(false); setIsFollower(false); setTimeLeft(u.duration); setS("reveal");
+    setRoom(u); setIsInsider(false); setIsFollower(false); setTimeLeft(u.duration); setS("reveal");
   };
 
   const doAsk = async () => {
@@ -591,14 +591,14 @@ export default function TekomiInsider() {
   const doNextRound = async () => {
     const newMaster = nextMaster(room.players, room.masterId, room.masterRule || "random", room.hostId);
     const u = { ...room, phase: "lobby", round: (room.round || 1) + 1, masterId: newMaster,
-      wordEnc: null, insiderEnc: null, loneCommonEnc: null, followerEnc: null, isPeaceVillage: false, isChaosRound: false,
+      wordEnc: null, insiderEnc: null, followerEnc: null, isPeaceVillage: false,
       startTime: null, wordGuessed: false, votes: {}, qa: [], scored: false, outcome: null };
     await saveRoom(ROOM, u);
     setRoom(u); setRoleRevealed(false); setS("lobby");
   };
 
   const doReset = () => {
-    setS("home"); setMyName(""); setIsMaster(false); setIsInsider(false); setIsLoneCommon(false);
+    setS("home"); setMyName(""); setIsMaster(false); setIsInsider(false);
     setRoomCode(""); setRoom(null); setRoleRevealed(false); setQInput(""); setErr(""); setFName("");
     setIsFollower(false); setIsHost(false);
   };
@@ -645,7 +645,10 @@ export default function TekomiInsider() {
           <button className="mp-btn mp-green" onClick={doEnter} disabled={loading}>
             {loading ? "…" : "みんなで あつまる ▶"}
           </button>
-          {hostUnlocked && !gateOpen && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 4 }}>※今はクローズ中。下でオープンにすると みんな入れるよ</div>}
+          {hostUnlocked && (
+            <button className="mp-btn mp-blue" onClick={doResetRoom} style={{ marginBottom: 0 }}>🔄 部屋をリセットして新しく始める</button>
+          )}
+          {hostUnlocked && !gateOpen && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 6 }}>※今はクローズ中。下でオープンにすると みんな入れるよ</div>}
         </div>
       ) : (
         <div className="mp-panel" style={{ textAlign: "center", padding: 22 }}>
@@ -670,15 +673,8 @@ export default function TekomiInsider() {
       {err && <div style={{ color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, textAlign: "center", padding: "8px", marginTop: 6 }}>{err}</div>}
 
       <Bubble arrow>
-        ようこそてこ！🦉<br />なまえを入れて「みんなで あつまる」を押すてこ。はじめてなら「あそびかた」を見るといいてこ！
+        ようこそてこ！<br />なまえを入れて「みんなで あつまる」を押すてこ。はじめてなら「あそびかた」を見るといいてこ！
       </Bubble>
-      {hostUnlocked && (
-        <div style={{ textAlign: "center" }}>
-          <span onClick={doResetRoom} style={{ fontSize: 10, color: "#cfe2ff", textDecoration: "underline", cursor: "pointer" }}>
-            だれもいない？ 部屋をリセットして新しく始める
-          </span>
-        </div>
-      )}
     </Shell>
   );
 
@@ -869,13 +865,11 @@ export default function TekomiInsider() {
   }
 
   // ── 役職判定 ──
-  const chaos = !!room?.isChaosRound;
   let role = "common";
   if (isMaster) role = "master";
-  else if (chaos) role = isLoneCommon ? "chaos_common" : "chaos_insider";
   else if (isFollower) role = "follower";
   else role = isInsider ? "insider" : "common";
-  const knowsWord = role === "master" || role === "insider" || role === "chaos_insider";
+  const knowsWord = role === "master" || role === "insider";
 
   // ════ REVEAL ════
   if (screen === "reveal") {
@@ -887,8 +881,6 @@ export default function TekomiInsider() {
       insider:       { name: "インサイダー", color: "#E53935", desc: "正体を隠して、みんなをお題へ導くてこ" },
       common:        { name: "コモン", color: "#D4AF37", desc: "質問でお題を当てて、潜入者を暴くてこ" },
       follower:      { name: "フォロワー", color: "#a020e0", desc: "お題は知らないが、インサイダーの味方てこ" },
-      chaos_insider: { name: "インサイダー", color: "#E53935", desc: "実は多数派！知らないフリで紛れるてこ" },
-      chaos_common:  { name: "ただ1人のコモン", color: "#D4AF37", desc: "周りは全員お題を知ってる…当てにいくてこ" },
     }[role];
     return (
       <Shell>
@@ -936,8 +928,8 @@ export default function TekomiInsider() {
     const qa = room?.qa || [];
     const pending = qa.length > 0 && qa[qa.length - 1].ans === null;
     const word = dec(room?.wordEnc || "");
-    const roleLabel = { master: "マスター", insider: "インサイダー", common: "コモン", follower: "フォロワー", chaos_insider: "インサイダー", chaos_common: "コモン" }[role];
-    const roleColor = role === "master" ? "#D4AF37" : (role === "insider" || role === "chaos_insider") ? "#E53935" : role === "follower" ? "#a020e0" : "#D4AF37";
+    const roleLabel = { master: "マスター", insider: "インサイダー", common: "コモン", follower: "フォロワー" }[role];
+    const roleColor = role === "master" ? "#D4AF37" : role === "insider" ? "#E53935" : role === "follower" ? "#a020e0" : "#D4AF37";
     return (
       <Shell>
         <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12 }}>
@@ -1002,30 +994,27 @@ export default function TekomiInsider() {
   if (screen === "vote") {
     const votable = (room?.players || []).filter((p) => p.id !== room?.masterId && p.id !== myId);
     const voteCount = Object.keys(room?.votes || {}).length;
-    const totalVoters = (room?.players || []).filter((p) => p.id !== room?.masterId).length;
+    const totalVoters = (room?.players || []).length; // マスター含め全員が投票
     const myVote = room?.votes?.[myId];
-    const chaos = !!room?.isChaosRound;
     return (
       <Shell>
         <div style={{ textAlign: "center", padding: "30px 0 22px" }}>
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}><OwlDoc size={70} bob expr="suspicious" /></div>
           <div className="mp-title" style={{ fontSize: 22 }}>お題は暴かれた！</div>
           <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>
-            {chaos ? "お題を知らない“コモン”は誰だ？" : "潜入者は誰だ。一斉投票せよ！"}
+            潜入者は誰だ。一斉投票せよ！
           </div>
           <div style={{ fontSize: 11, marginTop: 8, letterSpacing: 2, textShadow: "1px 1px 0 #000" }}>{voteCount} / {totalVoters} 票</div>
         </div>
-        {isMaster ? (
-          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>🎤 マスターは投票しない。開票を待つてこ</div>
-        ) : myVote ? (
+        {myVote ? (
           <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>✓ 投票完了。開票を待つてこ</div>
         ) : (
           <div className="mp-panel">
-            <div className="mp-panel-head">{chaos ? "★ コモンは誰だ？ ★" : "★ インサイダーは誰だ？ ★"}</div>
+            <div className="mp-panel-head">★ インサイダーは誰だ？ ★</div>
             {votable.map((p) => (
               <button key={p.id} className="mp-btn mp-blue" onClick={() => doVote(p.id)}>{p.name}</button>
             ))}
-            {room?.peace && !chaos && (
+            {room?.peace && (
               <button className="mp-btn mp-green" onClick={() => doVote(NONE_ID)}>✅ インサイダーはいない（平和村）</button>
             )}
           </div>
@@ -1036,12 +1025,9 @@ export default function TekomiInsider() {
 
   // ════ RESULT ════
   if (screen === "result") {
-    const chaos = !!room?.isChaosRound;
     const isPeace = !!room?.isPeaceVillage;
-    const insiderId = isPeace || chaos ? null : dec(room?.insiderEnc || "");
+    const insiderId = isPeace ? null : dec(room?.insiderEnc || "");
     const insiderPlayer = room?.players?.find((p) => p.id === insiderId);
-    const loneId = chaos ? dec(room?.loneCommonEnc || "") : null;
-    const lonePlayer = room?.players?.find((p) => p.id === loneId);
     const word = dec(room?.wordEnc || "");
     const votes = room?.votes || {};
     const vc = {};
@@ -1050,10 +1036,9 @@ export default function TekomiInsider() {
     const titleMap = {
       commons: "コモンの勝利！", insider: "インサイダーの勝利！", timeout: "時間切れ — 失敗…",
       peace_win: "平和村 — 村の勝利！", peace_lose: "平和村 — 村の失敗…", peace_timeout: "時間切れ — 失敗…",
-      chaos: "カオス — 決着！",
     };
     const title = titleMap[oc] || "結果";
-    const tcol = (oc === "commons" || oc === "peace_win") ? "#D4AF37" : oc === "chaos" ? "#D4AF37" : "#E53935";
+    const tcol = (oc === "commons" || oc === "peace_win") ? "#D4AF37" : "#E53935";
     return (
       <Shell>
         <Header sub={`ROUND ${room?.round || 1} 結果`} onBack={() => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) doReset(); }} />
@@ -1064,16 +1049,7 @@ export default function TekomiInsider() {
           </div>
         </div>
 
-        {chaos ? (
-          <div className="mp-panel" style={{ textAlign: "center", border: "5px solid #D4AF37" }}>
-            <div className="mp-panel-head" style={{ background: "#D4AF37" }}>ただ1人のコモンは…</div>
-            <div className="mp-row" style={{ justifyContent: "center", gap: 10 }}>
-              <OwlDoc size={40} />
-              <span style={{ fontSize: 24, color: "#D4AF37", WebkitTextStroke: "0.5px #000" }}>{lonePlayer?.name || "?"}</span>
-            </div>
-            <div style={{ fontSize: 10, color: "#a020e0", marginTop: 8 }}>※カオスの採点ルールは調整中（暫定：的中で全員+1pt）</div>
-          </div>
-        ) : isPeace ? (
+        {isPeace ? (
           <div className="mp-panel" style={{ textAlign: "center", border: "5px solid #D4AF37" }}>
             <div className="mp-panel-head" style={{ background: "#D4AF37" }}>このラウンドは…</div>
             <div style={{ fontSize: 22, color: "#D4AF37", WebkitTextStroke: "0.5px #000" }}>平和村 😇</div>
@@ -1096,7 +1072,7 @@ export default function TekomiInsider() {
             return (room?.players || []).map((p) => (
               <div key={p.id} className="mp-row" style={{ padding: "7px 0", borderBottom: "2px dashed #ddd" }}>
                 <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 13, color: (!isPeace && !chaos && p.id === insiderId) ? "#E53935" : p.id === room.masterId ? "#D4AF37" : "#111" }}>
+                  <span style={{ fontSize: 13, color: (!isPeace && p.id === insiderId) ? "#E53935" : p.id === room.masterId ? "#D4AF37" : "#111" }}>
                     {flair[p.name] ? flair[p.name] + " " : (p.id === room.masterId ? "🎤 " : "")}{p.name}{p.id === myId ? "（あなた）" : ""}
                   </span>
                   {vc[p.id] ? <span style={{ fontSize: 10, color: "#888" }}>　{vc[p.id]}票</span> : null}

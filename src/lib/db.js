@@ -25,6 +25,11 @@ export async function saveRoom(code, data) {
   await set(ref(db, `rooms/${code}`), data);
 }
 
+// 部屋の特定フィールドだけ更新（残り時間の毎秒同期など。全体を上書きしないので競合しない）
+export async function setRoomField(code, key, value) {
+  await set(ref(db, `rooms/${code}/${key}`), value);
+}
+
 export async function loadRoom(code) {
   const snap = await get(ref(db, `rooms/${code}`));
   return snap.exists() ? snap.val() : null;
