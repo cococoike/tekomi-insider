@@ -82,6 +82,15 @@ const CSS = `
   text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,2px 2px 0 #000,-2px 2px 0 #000,4px 4px 0 rgba(0,0,0,.6);
   text-align:center; line-height:1.3; letter-spacing:1px; }
 .mp-sub { font-size:11px; text-align:center; letter-spacing:3px; text-shadow:1px 1px 0 #000; margin-top:6px; color:#F2F2F2; }
+.tk-logo { text-align:center; line-height:1; user-select:none; }
+.tk-logo-top { font-size:15px; color:#F4F1EA; letter-spacing:6px; text-indent:6px;
+  text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,2px 2px 0 rgba(0,0,0,.6); margin-bottom:4px; }
+.tk-logo-main { font-size:46px; color:#D4AF37; letter-spacing:4px; text-indent:4px; font-weight:400;
+  text-shadow:3px 0 0 #000,-3px 0 0 #000,0 3px 0 #000,0 -3px 0 #000,3px 3px 0 #000,-3px 3px 0 #000,3px -3px 0 #000,-3px -3px 0 #000,5px 6px 0 rgba(0,0,0,.55); }
+.tk-logo-sub { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:7px;
+  font-size:18px; color:#D4AF37; letter-spacing:8px; text-indent:8px;
+  text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,2px 2px 0 rgba(0,0,0,.6); }
+.tk-logo-bar { display:inline-block; width:34px; height:4px; background:#D4AF37; box-shadow:0 2px 0 #000, 0 0 0 1px #000; }
 .mp-h { font-size:13px; color:#D4AF37;
   text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,2px 2px 0 rgba(0,0,0,.6);
   letter-spacing:2px; text-align:center; margin-bottom:10px; }
@@ -193,12 +202,14 @@ const OwlDoc = ({ size = 54, bob = false, expr = "normal" }) => {
 };
 
 // INSIDER GAME ロゴ（public/logo.png。無ければテキスト）
-const Logo = ({ width = 230 }) => {
-  const [ok, setOk] = useState(true);
-  if (!ok) return <div className="mp-title">てこみンサイダー<br />ゲーム❤</div>;
-  return <img src="/logo.png" alt="INSIDER GAME" onError={() => setOk(false)}
-    style={{ width, maxWidth: "100%", display: "block", margin: "0 auto", imageRendering: "pixelated" }} />;
-};
+// タイトルロゴ（ドットフォント＋金の袋文字）
+const Logo = () => (
+  <div className="tk-logo">
+    <div className="tk-logo-top">てこみの</div>
+    <div className="tk-logo-main">INSIDER</div>
+    <div className="tk-logo-sub"><span className="tk-logo-bar" />GAME<span className="tk-logo-bar" /></div>
+  </div>
+);
 
 const Bubble = ({ name = "てこみん", children, arrow = false, expr = "normal" }) => (
   <div className="mp-bubble">
