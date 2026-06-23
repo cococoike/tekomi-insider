@@ -599,6 +599,14 @@ export default function TekomiInsider() {
     await saveRoom(ROOM, u); setRoom(u);
   };
 
+  // 電波不良などで全員の票が揃わないとき、主催者が今ある票で強制開票
+  const doForceFinalize = async () => {
+    if (!room || room.scored) return;
+    sfxDrumroll();
+    const u = await finalize(ROOM, room);
+    setRoom(u); setS("result");
+  };
+
   const doNextRound = async () => {
     const newMaster = nextMaster(room.players, room.masterId, room.masterRule || "random", room.hostId);
     const u = { ...room, phase: "lobby", round: (room.round || 1) + 1, masterId: newMaster,
@@ -650,11 +658,10 @@ export default function TekomiInsider() {
         <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 22 }}>…よみこみ中…</div>
       ) : (gateOpen || hostUnlocked) ? (
         <div className="mp-panel">
-          <div className="mp-panel-head">▶ なまえをいれて あつまる</div>
           <input className="mp-input" placeholder="あなたのなまえ" value={fName}
             onChange={(e) => setFName(e.target.value)} maxLength={10} />
           <button className="mp-btn mp-green" onClick={doEnter} disabled={loading}>
-            {loading ? "…" : "みんなで あつまる ▶"}
+            {loading ? "…" : "▶ はじめる"}
           </button>
           {hostUnlocked && (
             <button className="mp-btn mp-blue" onClick={doResetRoom} style={{ marginBottom: 0 }}>🔄 部屋をリセットして新しく始める</button>
@@ -995,7 +1002,14 @@ export default function TekomiInsider() {
           {timeLeft === 0 && <button className="mp-btn mp-red" onClick={doTimeUp}>⏰ 時間切れ → 結果へ</button>}
         </>}
         {!isMaster && timeLeft === 0 && (
-          <div style={{ textAlign: "center", color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, padding: 8 }}>時間切れ。マスターの操作を待つてこ</div>
+          <div style={{ textAlign: "center", color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, padding: 8, marginBottom: 8 }}>時間切れ。マスターの操作を待つてこ</div>
+        )}
+        {isHost && !isMaster && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 10, color: "#fff", textShadow: "1px 1px 0 #000", textAlign: "center", marginBottom: 4 }}>主催者の強制進行（マスターが反応しない時）</div>
+            <button className="mp-btn mp-red" onClick={doWordGuessed}>⏩ 強制で投票へ</button>
+            <button className="mp-btn mp-red" onClick={doTimeUp}>⏩ 強制で結果へ（時間切れ扱い）</button>
+          </div>
         )}
       </Shell>
     );
@@ -1029,6 +1043,11 @@ export default function TekomiInsider() {
               <button className="mp-btn mp-green" onClick={() => doVote(NONE_ID)}>✅ インサイダーはいない（平和村）</button>
             )}
           </div>
+        )}
+        {isHost && (
+          <button className="mp-btn mp-red" onClick={doForceFinalize} style={{ marginTop: 6 }}>
+            ⏩ 強制的に開票する（揃わない時用）
+          </button>
         )}
       </Shell>
     );
