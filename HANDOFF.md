@@ -8,8 +8,9 @@
 - ターゲットは身内。完全クローズド前提。
 
 ## 場所・実行・デプロイ
-- プロジェクト: `C:\Users\koike_s\iCloudDrive\tekomi-insider`（**iCloud Drive直下**。会社PCにローカル残さない方針＆Obsidian Vaultの外に置いている）
+- プロジェクト正本: GitHub `cococoike/tekomi-insider`。ローカル作業コピーは `G:\マイドライブ\nakimushi-works\games\tekomi-insider`（Google Drive。**node_modules / dist は Drive に置かない**。開発時は別フォルダへ clone して作業し、ソースだけ Drive に戻す運用でもOK）
 - 開発: `npm run dev`（http://localhost:5173/ ）/ ビルド: `npm run build`
+- 動作確認（Firebase なし）: `npm run dev:mock`（http://localhost:5199/ ）。`src/lib/db.mock.js` のメモリDBに差し替わる。ブラウザのコンソールで `window.__db.loadRoom('main')` / `window.__db.saveRoom('main', data)` を使うと偽プレイヤーや票を注入して1台で全画面を確認できる
 - 本番: **Vercel** が GitHub `cococoike/tekomi-insider` の main push で自動デプロイ。URL = https://tekomi-insider.vercel.app
 - 反映手順: 変更 → `git add` → `git commit` → `git push origin main`（→Vercelが自動ビルド）
 
@@ -21,10 +22,36 @@
 - `vite.config.js` に `server.fs.strict:false`（フォルダ名の "~" 対策。消さない）
 
 ## 構成
-- `src/App.jsx` … ほぼ全部（画面・状態・ゲームロジック・CSS文字列・キャラSVG）
-- `src/lib/db.js` … Firebase 抽象
-- `src/lib/words.js` … お題リスト（通常6カテゴリ＋アダルト専用 `ADULT_LIST`）。`pickWord(cat, used, adult)`
+- `src/App.jsx` … ホーム／チュートリアル／通算成績／**共通ロビー**（ゲーム切替・設定）／インサイダー本体（役職配布・質問・投票・採点）
+- `src/ui.jsx` … 共通UI（CSS文字列・てこみんSVG `OwlDoc`・`Shell`/`Bubble`/`Header`/`ModeCard`/`ScoreRows`）と小道具（`enc/dec`・`computeFlair`・`topVote`）
+- `src/games/WordWolf.jsx` … ワードウルフ（設定パネル `WolfSettings`・本体 `WolfGame`・`startWolfRound`）
+- `src/games/WordJammer.jsx` … ワードジャマー（`JammerSettings`・`JammerGame`・`startJammerRound`）
+- `src/lib/db.js` … Firebase 抽象（`db.mock.js` はテスト用の差し替え先）
+- `src/lib/scoring.js` … 通算成績への反映 `applyLeaderboard` と部屋内スコア加算 `addScores`（全ゲーム共通）
+- `src/lib/words.js` … お題リスト（通常6カテゴリ＋アダルト専用 `ADULT_LIST` 約200語）、魔術カード `MAGIC_CARDS`、ワードウルフのペア `WOLF_PAIRS`/`WOLF_PAIRS_ADULT`、ジャマー質問 `JAMMER_QUESTIONS`/`_ADULT`
 - `src/lib/sound.js` … WebAudio 合成の効果音（音声ファイル不要）
+
+## ゲーム切替（2026-09 追加）
+- 部屋は1つのまま、`room.game` = `insider` / `wordwolf` / `jammer` を部屋主がロビーで切り替える。メンバー・部屋内スコア・通算成績は引き継ぐ
+- App の購読処理は `game !== "insider"` のとき画面 `sub` に飛ばし、各モジュールが `room.phase` を見て描く（インサイダーは従来どおり screen 遷移）
+- 各モジュールは `startXxxRound(room)` / `resetXxxRound(room)` の純関数を export し、App の開始／次ラウンドから呼ぶ
+
+### マジカル（インサイダーのオプション `magic`）
+- 『マジカルインサイダー』（オインクゲームズ 2026-10 発売）風。マスター＝**魔術師**、それ以外＝村人チーム（インサイダー1人＋村人）。村人はお題を知らないが**インサイダーが誰かは知る**。村人チーム全員に**魔術カード**（しゃべり方の縛り、`room.magicCards[playerId]`）を配る
+- お題的中後は**魔術師だけが**インサイダーを指名（`votes[masterId]`）。当てたら魔術師 +3、外したら村人チーム全員 +2。時間切れは魔術師 +2／村人チーム −1
+- 平和村・フォロワーとは排他（ON にすると相手側が OFF になる）
+- ※製品版の細かい採点は公式ルール未確認。現状はこのアプリ独自の配点
+
+### ワードウルフ（`room.wolf`）
+- ペアを引いて多数派/少数派をランダム入替。ウルフは 7人以上で2人、それ未満は1人。話し合い 3/4/5分（部屋主が時計＝`timeLeft` を毎秒配信）＋1分延長
+- 投票は全員。最後に投票した端末が開票（`tally`）。最多票が単独でウルフなら `wolfguess` フェーズ→ウルフが多数派のお題を入力→**市民のだれかが正解/不正解を判定**（文字列比較はしない）
+- 得点: 市民勝ち 市民 +1／ウルフ逃げ切り +2／逆転 +3。アダルトONで `WOLF_PAIRS_ADULT` のみになる
+
+### ワードジャマー（`room.jam`）
+- 役は `round` ベースでじゅんぐり: ダスモン = players[(round-1)%n]、ジャマー = その次、残り全員がワカルン。3人以上
+- step: `answer`（ダスモンが本当の答え入力）→ `fake`（ジャマーが嘘2つ）→ `pick`（3択をシャッフル `order`、ワカルンが選ぶ）→ result。最後に選んだ端末が採点。部屋主は「今ある回答で締め切る」で強制終了
+- 得点: 正解ワカルン +難易度pt(1〜3)／不正解1人につきジャマー +1／ワカルンの半数以上正解でダスモン +1（製品版の配点は未確認・独自）
+- 答えは `enc` で難読化して保存（他端末の DevTools から丸見えにならない程度）
 
 ## 仕様の要点（＝設計判断）
 - **入室**: ルームコード廃止。全員ひとつの部屋 `rooms/main`。名前を入れて「はじめる」。
@@ -32,7 +59,7 @@
 - **開閉ゲート**: 普段は閉。**主催者キー `HOST_KEY = "tekomi"`**（App.jsx内）を入れた人＝主催者。主催者だけが オープン/クローズ・部屋リセット・ゲーム設定・強制進行 を操作できる。状態は `rooms/__gate__`。
 - **マスターは毎ラウンド交代**（ランダム/じゅんぐり/固定。部屋主が設定）。マスターがお題を引いてスタート。マスターはお題を知り YES/NO で答える役。
 - **役職**: マスター / インサイダー / コモン / フォロワー（フォロワーは6人以上で発動・お題は知らないがインサイダーが誰かは知る・運命共同体）。
-- **オプション（独立トグル・部屋主が設定）**: 平和村（10%でインサイダー不在）/ アダルト（お題がきわどく）/ フォロワー。※**カオスは廃止した**（お題当て構造と噛み合わず破綻するため）。
+- **オプション（独立トグル・部屋主が設定）**: マジカル（上記）/ 平和村（10%でインサイダー不在）/ アダルト（お題がきわどく・ワードウルフ／ジャマーにも効く）/ フォロワー。※**カオスは廃止した**（お題当て構造と噛み合わず破綻するため）。
 - **制限時間**: 5/7/9分から選択＋1分延長。**残り時間はマスターが正で、毎秒 `setRoomField` で全員へ同期**。
 - **投票**: お題的中後、マスター含む全員が投票（誰がインサイダーか）。全員揃うと自動開票。電波不良対策で**主催者は強制開票・強制進行ボタン**で各フェーズを飛ばせる。
 - **採点**:
