@@ -1,33 +1,27 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { subscribeRoom, saveRoom, setRoomField, loadRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
-import { pickWord } from "./lib/words";
-import { sfxClick, sfxSelect, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
+import { pickWord, dealMagicCards } from "./lib/words";
+import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
+import { applyLeaderboard, addScores } from "./lib/scoring";
+import { genId, ROOM, enc, dec, fmt, computeFlair, topVote, OwlDoc, Logo, Bubble, Shell, Redacted, Header, ErrBox, ScoreRows, ModeCard } from "./ui";
+import { WolfSettings, WolfGame, startWolfRound, resetWolfRound } from "./games/WordWolf";
+import { JammerSettings, JammerGame, startJammerRound, resetJammerRound } from "./games/WordJammer";
 
-const genId = () => Math.random().toString(36).slice(2, 11);
 const NONE_ID = "__none__";
-const BOTTOM_ICON = "💩";
-
-// 累計ポイント順位フレア（1位👑 / ビリ💩・同点は全員に付与）。全員同点なら付けない。
-function computeFlair(players, board) {
-  const flair = {};
-  if (!players || players.length < 2) return flair;
-  const pts = players.map((p) => ({ name: p.name, pt: (board?.[p.name]?.pts) || 0 }));
-  const max = Math.max(...pts.map((x) => x.pt));
-  const min = Math.min(...pts.map((x) => x.pt));
-  if (max > min) {
-    pts.forEach((x) => { if (x.pt === max) flair[x.name] = "👑"; else if (x.pt === min) flair[x.name] = BOTTOM_ICON; });
-  }
-  return flair;
-}
-const ROOM = "main"; // 身内専用：全員ひとつの部屋に集まる（ルームコード廃止）
 const GATE = "__gate__"; // 開閉フラグの保存先（rooms/ 配下なので既存ルールでOK）
 const HOST_KEY = "tekomi"; // 主催者キー（開閉できる人だけが知る合言葉。変更可）
-const enc = (t) => { try { return btoa(unescape(encodeURIComponent(t))); } catch { return btoa(t); } };
-const dec = (s) => { try { return decodeURIComponent(escape(atob(s))); } catch { return ""; } };
 const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "むずかしめ"];
 
-// 各オプションは独立ON/OFF。組み合わせOK。
+// ── 遊べるゲーム。ロビーで部屋主が切り替える（同じ部屋・同じメンバーのまま移動できる）──
+export const GAMES = {
+  insider:  { label: "インサイダー", emoji: "🕵️", color: "#D4AF37", min: 3, desc: "質問でお題を当て、知ってるフリの潜入者を暴く" },
+  wordwolf: { label: "ワードウルフ", emoji: "🐺", color: "#5b8def", min: 3, desc: "みんなでお題を語り合い、1人だけ違うお題の“ウルフ”を探す" },
+  jammer:   { label: "ワードジャマー", emoji: "📝", color: "#3cb371", min: 3, desc: "本当の答えに嘘を2つ混ぜて、見抜けるか騙し合う" },
+};
+
+// 各オプションは独立ON/OFF。マジカルは役職構造が変わるので、平和村・フォロワーとは同時に使わない。
 const OPTS = [
+  { key: "magic",    label: "マジカル🪄", emoji: "🧙", desc: "マスター＝魔術師。村人は正解を知らないが誰がインサイダーか知っている。しゃべり方の縛り“魔術カード”つき", color: "#5b8def" },
   { key: "peace",    label: "平和村",      emoji: "😇", desc: "10%でインサイダー不在。疑心暗鬼MAX", color: "#8a8a8a" },
   { key: "adult",    label: "アダルト🔞", emoji: "🌶️", desc: "お題がきわどく…完全身内専用", color: "#a020e0" },
   { key: "follower", label: "フォロワー",  emoji: "🥷", desc: "6人以上で発動。インサイダーの隠れ味方が1人", color: "#7a2fa0" },
@@ -36,9 +30,10 @@ const OPTS = [
 const optsSummary = (r) => {
   if (!r) return "ふつう";
   const on = [];
-  if (r.peace) on.push("平和村");
+  if (r.magic) on.push("マジカル");
+  if (r.peace && !r.magic) on.push("平和村");
   if (r.adult) on.push("アダルト");
-  if (r.follower) on.push("フォロワー");
+  if (r.follower && !r.magic) on.push("フォロワー");
   return on.length ? on.join("＋") : "ふつう";
 };
 
@@ -68,180 +63,32 @@ const TUTORIAL = [
   "でも、インサイダーが紛れてる…！お題が当たったら、全員で『インサイダーは誰だ？』と一斉投票するてこ。",
   "見破れたらコモンの勝ち、逃げ切ればインサイダーの勝ちだてこ。飲みながら、疑いながらワイワイやるのが一番てこ🍺",
   "とくてんはこうだてこ → お題＆犯人を当てたら【コモン・マスター ともに+2】、インサイダーが逃げ切ったら【インサイダー+3】。時間内にお題が当たらなかったら【マスター0・コモン−1・インサイダー−2】！みんな損するから、インサイダーも“バレずに当てさせる”のがコツてこ。フォロワーはインサイダーと運命共同体てこ！",
-  "慣れたら【平和村】【カオス】【アダルト🔞】も試すてこ！部屋主がロビーで“ゲーム設定”からモードやフォロワーを選べるてこ。それじゃ、いってらっしゃいてこ！",
+  "【マジカル🪄】は新作『マジカルインサイダー』風のモードてこ。マスターは“魔術師”になって、村人チーム（インサイダー＋村人）と対決！村人はお題は知らないけど、誰がインサイダーかは知ってるてこ。全員に“魔術カード”（ヒソヒソ声・ロボット…）が配られて、その縛りでしゃべるてこ。お題を当てたあと、魔術師が1人でインサイダーを指名。当たれば魔術師の勝ち、外れれば村人チームの勝ちてこ！",
+  "ロビーの“ゲームをえらぶ”から【ワードウルフ🐺】【ワードジャマー📝】にも移動できるてこ。ルールはそれぞれの画面で てこみんが説明するてこ。部屋主がロビーで“ゲーム設定”からモードやオプションを選べるてこ。それじゃ、いってらっしゃいてこ！",
 ];
 
-const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=DotGothic16&display=swap');
-* { box-sizing: border-box; }
-.mp-page, .mp-page * { font-family:'DotGothic16','Hiragino Kaku Gothic ProN','Yu Gothic',sans-serif; }
-.mp-page { min-height:100vh; max-width:460px; margin:0 auto;
-  background: radial-gradient(ellipse at 50% 16%, #232323, #0d0d0d 60%, #050505); color:#F2F2F2;
-  padding:18px 16px 44px; position:relative; overflow-x:hidden; }
-.mp-title { font-size:26px; color:#D4AF37;
-  text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,2px 2px 0 #000,-2px 2px 0 #000,4px 4px 0 rgba(0,0,0,.6);
-  text-align:center; line-height:1.3; letter-spacing:1px; }
-.mp-sub { font-size:11px; text-align:center; letter-spacing:3px; text-shadow:1px 1px 0 #000; margin-top:6px; color:#F2F2F2; }
-.tk-logo { text-align:center; line-height:1; user-select:none; }
-.tk-logo-top { font-size:15px; color:#F4F1EA; letter-spacing:6px; text-indent:6px;
-  text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,2px 2px 0 rgba(0,0,0,.6); margin-bottom:4px; }
-.tk-logo-main { font-size:46px; color:#D4AF37; letter-spacing:4px; text-indent:4px; font-weight:400;
-  text-shadow:3px 0 0 #000,-3px 0 0 #000,0 3px 0 #000,0 -3px 0 #000,3px 3px 0 #000,-3px 3px 0 #000,3px -3px 0 #000,-3px -3px 0 #000,5px 6px 0 rgba(0,0,0,.55); }
-.tk-logo-sub { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:7px;
-  font-size:18px; color:#D4AF37; letter-spacing:8px; text-indent:8px;
-  text-shadow:2px 0 0 #000,-2px 0 0 #000,0 2px 0 #000,0 -2px 0 #000,2px 2px 0 rgba(0,0,0,.6); }
-.tk-logo-bar { display:inline-block; width:34px; height:4px; background:#D4AF37; box-shadow:0 2px 0 #000, 0 0 0 1px #000; }
-.mp-h { font-size:13px; color:#D4AF37;
-  text-shadow:1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,2px 2px 0 rgba(0,0,0,.6);
-  letter-spacing:2px; text-align:center; margin-bottom:10px; }
-.mp-panel { background:#F4EFE3; border:4px solid #D4AF37; border-radius:16px; box-shadow:0 7px 0 #000;
-  padding:14px 12px; margin-bottom:14px; color:#1a1a1a; }
-.mp-panel-head { background:linear-gradient(180deg,#e8cd72,#D4AF37); color:#0D0D0D; border:2.5px solid #000; border-radius:8px; text-align:center;
-  font-size:11px; padding:5px; margin-bottom:10px; letter-spacing:2px; }
-.mp-btn { display:block; width:100%; border:3px solid #000; border-radius:12px; font-family:inherit;
-  font-size:14px; padding:13px 0 11px; cursor:pointer; letter-spacing:1px; margin-bottom:10px; color:#fff;
-  -webkit-text-stroke:0.3px #000; transition:transform .07s, box-shadow .07s; }
-.mp-btn:active { transform:translateY(5px); box-shadow:none !important; }
-.mp-btn:disabled { filter:grayscale(0.6) brightness(0.8); cursor:default; transform:none; }
-.mp-red    { background:linear-gradient(180deg,#ff7b6e,#E53935 50%,#9c150f); box-shadow:0 6px 0 #5e0d09,0 7px 0 #000; text-shadow:1px 1px 0 #600; }
-.mp-blue   { background:linear-gradient(180deg,#3a3a3a,#1e1e1e 50%,#0d0d0d); border-color:#D4AF37; box-shadow:0 6px 0 #000,0 7px 0 #D4AF37; color:#D4AF37; text-shadow:1px 1px 0 #000; }
-.mp-yellow { background:linear-gradient(180deg,#fbf3da,#e7d49f 50%,#c2a557); box-shadow:0 6px 0 #8a7434,0 7px 0 #000; color:#3a2a00; text-shadow:1px 1px 0 rgba(255,255,255,.5); }
-.mp-green  { background:linear-gradient(180deg,#f1d885,#D4AF37 50%,#937017); box-shadow:0 6px 0 #5e4810,0 7px 0 #000; color:#1a1200; text-shadow:1px 1px 0 #f5e9c4; }
-.mp-purple { background:linear-gradient(180deg,#e29bff,#a020e0 50%,#6a0fa0); box-shadow:0 6px 0 #4a0a78,0 7px 0 #000; text-shadow:1px 1px 0 #408; }
-.mp-input { width:100%; background:#fbf7ec; border:3px solid #000; border-radius:8px;
-  box-shadow:inset 0 3px 0 rgba(0,0,0,.12); padding:11px 12px; font-family:inherit; font-size:16px;
-  color:#111; margin-bottom:10px; outline:none; }
-.mp-bubble { background:#fffef0; border:4px solid #000; border-radius:14px;
-  box-shadow:0 5px 0 #000, inset 0 0 0 2px #D4AF37; padding:12px 12px 10px 58px; position:relative;
-  min-height:56px; color:#111; font-size:12px; line-height:1.65; margin-bottom:14px; }
-.mp-bubble-name { position:absolute; top:-12px; left:54px; background:#D4AF37; border:2.5px solid #000;
-  border-radius:8px; font-size:10px; padding:1px 8px; box-shadow:1px 2px 0 #000; color:#0D0D0D; }
-.mp-bubble-owl { position:absolute; left:-8px; top:-12px; }
-.mp-row { display:flex; justify-content:space-between; align-items:center; }
-.mp-star { position:absolute; pointer-events:none; }
-.mp-bob { animation: mp-bob 1.3s ease-in-out infinite; }
-@keyframes mp-tw { 0%,100%{opacity:.35;transform:scale(1)} 50%{opacity:1;transform:scale(1.35)} }
-@keyframes mp-bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-4px)} }
-@keyframes mp-blink { 50%{opacity:0} }
-/* ファミコン風 2フレーム：カクッとホップ＋たまにまばたき */
-.tk-hop { animation: tk-hop .62s infinite; }
-@keyframes tk-hop { 0%,50%{transform:translateY(0)} 50.01%,100%{transform:translateY(-3px)} }
-.tk-lid { transform-box: fill-box; transform-origin: center; animation: tk-blink 3.4s steps(1) infinite; }
-@keyframes tk-blink { 0%,93%{transform:scaleY(0)} 94%,98%{transform:scaleY(1)} 100%{transform:scaleY(0)} }
-.mp-modecard { display:flex; align-items:center; gap:9px; text-align:left; width:100%;
-  border:3px solid #000; border-radius:12px; padding:9px 10px; margin-bottom:9px; cursor:pointer;
-  box-shadow:0 4px 0 #000; background:#fff; color:#111; font-family:inherit; }
-.mp-modecard:active { transform:translateY(3px); box-shadow:none; }
-`;
-
-const STARS = [
-  { t: "6%", l: "12%", s: 11, c: "#FFD700", d: "0s" }, { t: "10%", l: "82%", s: 9, c: "#fff", d: ".4s" },
-  { t: "20%", l: "50%", s: 7, c: "#ffec8a", d: ".8s" }, { t: "30%", l: "8%", s: 8, c: "#fff", d: "1.1s" },
-  { t: "34%", l: "90%", s: 12, c: "#FFD700", d: ".2s" }, { t: "48%", l: "20%", s: 7, c: "#fff", d: ".9s" },
-  { t: "55%", l: "78%", s: 9, c: "#ffec8a", d: "1.3s" }, { t: "66%", l: "6%", s: 10, c: "#FFD700", d: ".5s" },
-  { t: "72%", l: "92%", s: 8, c: "#fff", d: "1s" }, { t: "82%", l: "30%", s: 7, c: "#ffec8a", d: ".3s" },
-  { t: "88%", l: "70%", s: 11, c: "#FFD700", d: ".7s" }, { t: "92%", l: "14%", s: 8, c: "#fff", d: "1.2s" },
-];
-const Stars = () => (
-  <>{STARS.map((s, i) => (
-    <div key={i} className="mp-star" style={{
-      top: s.t, left: s.l, width: s.s, height: s.s, background: s.c,
-      clipPath: "polygon(50% 0%,61% 35%,98% 35%,68% 57%,79% 91%,50% 70%,21% 91%,32% 57%,2% 35%,39% 35%)",
-      animation: `mp-tw 2s ease-in-out ${s.d} infinite`,
-    }} />
-  ))}</>
-);
-
-// オリジナルのドット絵てこみん（SVG・透過）。黒×白の帽＋金の星、金縁の服。表情5種。
-const PX = { W: "#F4F1EA", K: "#1E1E1E", G: "#D4AF37", S: "#F6D9B8", E: "#141414", H: "#ffffff" };
-// 帽子・顔・服のベース（顔の中身は表情で描く）
-const BASE = [
-  "....WWWWWWWW....",
-  "..WWWWWWWWWWWW..",
-  ".WWWWWWKKKKKWWW.",
-  "WWWWWWKKKGKKKWWW",
-  "WWWWWKKGGGGKKWWW",
-  "WWWWWKKKGGKKKWWW",
-  ".WWWWWWKKKKKWWW.",
-  "..WWWWWWWWWWWW..",
-  "...SSSSSSSSSS...",
-  "..SSSSSSSSSSSS..",
-  "..SSSSSSSSSSSS..",
-  "..SSSSSSSSSSSS..",
-  "...SSSSSSSSSS...",
-  "...KKKKKKKKKK...",
-  "..KKKGGGGGGKKK..",
-  "..KKK....KKK....",
-];
-const EXPRS = ["normal", "thinking", "surprised", "suspicious", "happy"];
-// 表情ごとの目・口（[x,y,w,h,色キー]）
-const FACES = {
-  normal:     [[4,9,2,2,"E"],[10,9,2,2,"E"],[4,9,1,1,"H"],[10,9,1,1,"H"],[6,12,4,1,"E"]],
-  happy:      [[4,10,1,1,"E"],[5,9,1,1,"E"],[10,9,1,1,"E"],[11,10,1,1,"E"],[6,11,4,1,"E"],[7,12,2,1,"E"]],
-  surprised:  [[4,9,2,2,"E"],[10,9,2,2,"E"],[4,9,1,1,"H"],[10,9,1,1,"H"],[7,11,2,2,"E"]],
-  thinking:   [[4,9,2,1,"E"],[10,9,2,1,"E"],[7,12,3,1,"E"]],
-  suspicious: [[3,10,3,1,"E"],[10,10,3,1,"E"],[8,12,3,1,"E"],[10,11,1,1,"E"]],
-};
-const OwlDoc = ({ size = 54, bob = false, expr = "normal" }) => {
-  const e = EXPRS.includes(expr) ? expr : "normal";
-  const cells = [];
-  BASE.forEach((row, y) => {
-    for (let x = 0; x < row.length; x++) {
-      const c = PX[row[x]];
-      if (c) cells.push(<rect key={`b${x}-${y}`} x={x} y={y} width={1.02} height={1.02} fill={c} />);
-    }
-  });
-  FACES[e].forEach(([x, y, w, h, k], i) => cells.push(<rect key={`f${i}`} x={x} y={y} width={w} height={h} fill={PX[k]} />));
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" className={bob ? "tk-hop" : ""}
-      shapeRendering="crispEdges" style={{ display: "block", filter: "drop-shadow(1px 1.5px 0 rgba(0,0,0,.55))" }}>
-      {cells}
-      {bob && <rect className="tk-lid" x="3" y="9" width="10" height="2" fill="#F6D9B8" />}
-    </svg>
-  );
-};
-
-// INSIDER GAME ロゴ（public/logo.png。無ければテキスト）
-// タイトルロゴ（ドットフォント＋金の袋文字）
-const Logo = () => (
-  <div className="tk-logo">
-    <div className="tk-logo-top">てこみの</div>
-    <div className="tk-logo-main">INSIDER</div>
-    <div className="tk-logo-sub"><span className="tk-logo-bar" />GAME<span className="tk-logo-bar" /></div>
-  </div>
-);
-
-const Bubble = ({ name = "てこみん", children, arrow = false, expr = "normal" }) => (
-  <div className="mp-bubble">
-    <span className="mp-bubble-owl"><OwlDoc size={52} bob expr={expr} /></span>
-    <span className="mp-bubble-name">{name}</span>
-    {children}
-    {arrow && <span style={{ position: "absolute", bottom: 8, right: 12, color: "#E53935", fontSize: 12, animation: "mp-blink .8s steps(1) infinite" }}>▼</span>}
-  </div>
-);
-
-const Shell = ({ children }) => (
-  <>
-    <style>{CSS}</style>
-    <div className="mp-page"><Stars />{children}</div>
-  </>
-);
-
-const PointsPanel = () => (
+const PointsPanel = ({ magic }) => (
   <div className="mp-panel">
     <div className="mp-panel-head">★ とくてん ★</div>
     <div style={{ fontSize: 11, lineHeight: 1.85, color: "#1a1a1a" }}>
-      <div><b style={{ color: "#b8901f" }}>コモン勝利</b>（お題＆犯人を当てた）：コモン・マスター ともに <b>+2</b></div>
-      <div><b style={{ color: "#E53935" }}>インサイダー逃げ切り</b>（お題は判明したが犯人を当てられなかった）：インサイダー <b>+3</b></div>
-      <div><b style={{ color: "#E53935" }}>時間切れ</b>（お題を当てられず）：マスター0／コモン <b>−1</b>／インサイダー <b>−2</b></div>
-      <div style={{ color: "#7a2fa0" }}>フォロワーはインサイダーと運命共同体（逃げ切り <b>+2</b> ／ 時間切れ <b>−2</b>）</div>
-      <div style={{ color: "#6a6a6a" }}>平和村：全員が「インサイダーなし」に投票できたら全員 <b>+1</b></div>
+      {magic ? (
+        <>
+          <div><b style={{ color: "#5b8def" }}>村人チーム勝利</b>（お題を当て、魔術師が指名を外した）：村人・インサイダー <b>+2</b></div>
+          <div><b style={{ color: "#E53935" }}>魔術師の勝利</b>（インサイダーを見破った）：魔術師 <b>+3</b></div>
+          <div><b style={{ color: "#E53935" }}>時間切れ</b>（お題を当てられず）：魔術師 <b>+2</b>／村人チーム <b>−1</b></div>
+          <div style={{ color: "#6a6a6a" }}>魔術カードの縛りを破ったら…みんなでツッコむてこ（罰は口頭で）</div>
+        </>
+      ) : (
+        <>
+          <div><b style={{ color: "#b8901f" }}>コモン勝利</b>（お題＆犯人を当てた）：コモン・マスター ともに <b>+2</b></div>
+          <div><b style={{ color: "#E53935" }}>インサイダー逃げ切り</b>（お題は判明したが犯人を当てられなかった）：インサイダー <b>+3</b></div>
+          <div><b style={{ color: "#E53935" }}>時間切れ</b>（お題を当てられず）：マスター0／コモン <b>−1</b>／インサイダー <b>−2</b></div>
+          <div style={{ color: "#7a2fa0" }}>フォロワーはインサイダーと運命共同体（逃げ切り <b>+2</b> ／ 時間切れ <b>−2</b>）</div>
+          <div style={{ color: "#6a6a6a" }}>平和村：全員が「インサイダーなし」に投票できたら全員 <b>+1</b></div>
+        </>
+      )}
     </div>
   </div>
-);
-
-const Redacted = () => (
-  <span style={{ display: "inline-block", background: "#111", borderRadius: 3, width: "7em", height: "1.1em", verticalAlign: "middle" }} />
 );
 
 export default function TekomiInsider() {
@@ -275,6 +122,8 @@ export default function TekomiInsider() {
   const [cat, setCat] = useState("おまかせ");
   const [gateOpen, setGateOpen] = useState(null); // null=読込中
   const [hostUnlocked, setHostUnlocked] = useState(false);
+
+  const game = room?.game || "insider";
 
   // 開閉フラグを購読＋主催者ロック状態を復元
   useEffect(() => {
@@ -312,10 +161,10 @@ export default function TekomiInsider() {
 
   // 累計成績（順位フレア用）をロビー／結果でロード
   useEffect(() => {
-    if (screen === "lobby" || screen === "result") {
+    if (screen === "lobby" || screen === "result" || (screen === "sub" && room?.phase === "result")) {
       loadLeaderboard().then(setLb).catch(() => {});
     }
-  }, [screen, room?.scored, room?.round]);
+  }, [screen, room?.scored, room?.round, room?.phase]);
 
   // 結果ジングル（ラウンドごと1回）
   const resultPlayed = useRef(null);
@@ -324,33 +173,48 @@ export default function TekomiInsider() {
       const key = `${room.round}-${room.outcome}`;
       if (resultPlayed.current !== key) {
         resultPlayed.current = key;
-        sfxResult(["commons", "peace_win"].includes(room.outcome));
+        sfxResult(["commons", "peace_win", "magic_village"].includes(room.outcome));
       }
     }
   }, [screen, room?.outcome, room?.round]);
 
-  // ── 採点 ──
+  // ── 採点（インサイダー）──
   const finalize = useCallback(async (code, data) => {
     if (data.scored) return data;
     const isPeace = !!data.isPeaceVillage;
+    const isMagic = !!data.magic;
     const insiderId = isPeace ? null : dec(data.insiderEnc || "");
     const followerId = dec(data.followerEnc || "");
-    const scores = { ...(data.scores || {}) };
-    const add = (name, pts) => { scores[name] = (scores[name] || 0) + pts; };
+    const delta = {};
+    const add = (name, pts) => { delta[name] = (delta[name] || 0) + pts; };
     let outcome;
     let winners = [];
 
-    if (isPeace) {
+    if (isMagic) {
+      // マジカル：マスター＝魔術師 vs 村人チーム（インサイダー＋村人）
+      const wizard = data.players.find((p) => p.id === data.masterId);
+      const team = data.players.filter((p) => p.id !== data.masterId);
+      if (!data.wordGuessed) {
+        if (wizard) { add(wizard.name, 2); winners.push(wizard.name); }
+        team.forEach((p) => add(p.name, -1));
+        outcome = "magic_timeout";
+      } else {
+        const guess = (data.votes || {})[data.masterId];
+        if (guess && guess === insiderId) {
+          if (wizard) { add(wizard.name, 3); winners.push(wizard.name); }
+          outcome = "magic_wizard";
+        } else {
+          team.forEach((p) => { add(p.name, 2); winners.push(p.name); });
+          outcome = "magic_village";
+        }
+      }
+    } else if (isPeace) {
       // 平和村ルート
       if (!data.wordGuessed) {
         outcome = "peace_timeout";
       } else {
-        const vc = {};
-        Object.values(data.votes || {}).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
-        const maxV = Math.max(0, ...Object.values(vc));
-        const top = Object.entries(vc).filter(([, v]) => v === maxV).map(([k]) => k);
-        const villageWon = top.length === 1 && top[0] === NONE_ID;
-        if (villageWon) {
+        const { top } = topVote(data.votes);
+        if (top === NONE_ID) {
           data.players.forEach((p) => { add(p.name, 1); winners.push(p.name); });
           outcome = "peace_win";
         } else {
@@ -361,7 +225,6 @@ export default function TekomiInsider() {
       // 通常ルート（ふつう／アダルト）。フォロワーはインサイダーと運命共同体。
       const fol = followerId ? data.players.find((p) => p.id === followerId) : null;
       if (!data.wordGuessed) {
-        // 時間切れ：マスター0／コモン-1／インサイダー・フォロワー-2。
         data.players.forEach((p) => {
           if (p.id === data.masterId) return;
           if (p.id === insiderId || p.id === followerId) add(p.name, -2);
@@ -369,12 +232,8 @@ export default function TekomiInsider() {
         });
         outcome = "timeout";
       } else {
-        const vc = {};
-        Object.values(data.votes || {}).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
-        const maxV = Math.max(0, ...Object.values(vc));
-        const top = Object.entries(vc).filter(([, v]) => v === maxV).map(([k]) => k);
-        const caught = top.length === 1 && top[0] === insiderId;
-        if (caught) {
+        const { top } = topVote(data.votes);
+        if (top === insiderId) {
           data.players.forEach((p) => {
             if (p.id === data.masterId) { add(p.name, 2); winners.push(p.name); }
             else if (p.id !== insiderId && p.id !== followerId) { add(p.name, 2); winners.push(p.name); }
@@ -389,17 +248,8 @@ export default function TekomiInsider() {
       }
     }
 
-    const board = await loadLeaderboard();
-    data.players.forEach((p) => {
-      const e = board[p.name] || { pts: 0, games: 0, wins: 0 };
-      e.games += 1;
-      e.pts += (scores[p.name] || 0) - ((data.scores || {})[p.name] || 0);
-      if (winners.includes(p.name)) e.wins += 1;
-      board[p.name] = e;
-    });
-    try { await saveLeaderboard(board); } catch {}
-
-    const updated = { ...data, phase: "result", scores, scored: true, outcome };
+    await applyLeaderboard(data.players, delta, winners);
+    const updated = { ...data, phase: "result", scores: addScores(data.scores, delta), scored: true, outcome };
     await saveRoom(code, updated);
     return updated;
   }, []);
@@ -415,10 +265,19 @@ export default function TekomiInsider() {
       setIsInsider(data.insiderEnc ? dec(data.insiderEnc) === myId : false);
       setIsFollower(data.followerEnc ? dec(data.followerEnc) === myId : false);
 
+      // ── ワードウルフ／ワードジャマーは phase をそのまま各モジュールが描く ──
+      if ((data.game || "insider") !== "insider") {
+        setRoom(data);
+        if (data.phase === "lobby") { if (cur !== "lobby") { setRoleRevealed(false); setS("lobby"); } }
+        else if (cur !== "sub") { setRoleRevealed(false); setS("sub"); }
+        return;
+      }
+
       if (data.phase === "vote") {
-        // マスターも投票する → 全員ぶん揃ったら開票
-        const voters = data.players;
-        if (Object.keys(data.votes || {}).length >= voters.length && voters.length > 0 && !data.scored) {
+        // 通常：マスターも投票する → 全員ぶん揃ったら開票。マジカル：魔術師1人の指名で開票
+        const need = data.magic ? 1 : data.players.length;
+        const got = data.magic ? (data.votes?.[data.masterId] ? 1 : 0) : Object.keys(data.votes || {}).length;
+        if (got >= need && need > 0 && !data.scored) {
           sfxDrumroll();
           const updated = await finalize(roomCode, data);
           setRoom(updated);
@@ -428,7 +287,7 @@ export default function TekomiInsider() {
       }
 
       setRoom(data);
-      if (data.phase === "lobby" && (cur === "result" || cur === "vote")) {
+      if (data.phase === "lobby" && (cur === "result" || cur === "vote" || cur === "sub" || cur === "game" || cur === "reveal")) {
         setRoleRevealed(false); setS("lobby");
       }
       if (data.phase === "playing" && cur === "lobby") { setRoleRevealed(false); setS("reveal"); }
@@ -462,11 +321,13 @@ export default function TekomiInsider() {
 
   // ── actions ──
   const freshRoom = (name, uid = myId) => ({
-    phase: "lobby", round: 1, peace: false, adult: false, follower: false, masterRule: "random",
+    game: "insider",
+    phase: "lobby", round: 1, peace: false, adult: false, follower: false, magic: false, masterRule: "random",
     hostId: uid, masterId: uid, wordEnc: null,
     insiderEnc: null, followerEnc: null, players: [{ id: uid, name }],
     startTime: null, duration: 300, wordGuessed: false, votes: {}, qa: [], scores: {}, scored: false,
-    usedWords: [], isPeaceVillage: false,
+    usedWords: [], isPeaceVillage: false, magicCards: {},
+    wolfDuration: 180, usedPairs: [], usedQuestions: [],
   });
 
   const doEnter = async () => {
@@ -499,7 +360,8 @@ export default function TekomiInsider() {
     if (uid !== myId) setMyId(uid);
     setMyName(name); setRoomCode(ROOM); setRoom(data);
     setIsMaster(data.masterId === uid); setIsHost(data.hostId === uid);
-    setS("lobby"); setLoading(false);
+    setS(data.phase === "lobby" || (data.game || "insider") === "insider" ? "lobby" : "sub");
+    setLoading(false);
   };
 
   const doResetRoom = async () => {
@@ -510,19 +372,28 @@ export default function TekomiInsider() {
     setRoleRevealed(false); setErr(""); setS("lobby");
   };
 
+  const save = async (u) => { await saveRoom(ROOM, u); setRoom(u); };
+
   const toggleOpt = async (key) => {
     if (!room) return;
     const u = { ...room, [key]: !room[key] };
     // アダルトを切り替えたら現在のお題はリセット（語彙ソースが変わるため）
     if (key === "adult") u.wordEnc = null;
-    await saveRoom(ROOM, u); setRoom(u);
+    // マジカルは平和村・フォロワーと排他
+    if (key === "magic" && u.magic) { u.peace = false; u.follower = false; }
+    if ((key === "peace" || key === "follower") && u[key]) u.magic = false;
+    await save(u);
   };
 
-  const setDuration = async (sec) => {
-    if (!room) return;
-    const u = { ...room, duration: sec };
-    await saveRoom(ROOM, u); setRoom(u);
+  // ゲームの切り替え（ロビーのみ・部屋主）。お題などラウンド状態はクリア、メンバー・得点は引き継ぐ
+  const setGame = async (g) => {
+    if (!room || room.phase !== "lobby") return;
+    let u = { ...room, game: g, wordEnc: null, insiderEnc: null, followerEnc: null, votes: {}, qa: [], scored: false, outcome: null, isPeaceVillage: false };
+    u = resetWolfRound(u); u = resetJammerRound(u);
+    await save(u);
   };
+
+  const setDuration = async (sec) => { if (room) await save({ ...room, duration: sec }); };
 
   const doExtend = async () => {
     if (!room) return;
@@ -534,52 +405,65 @@ export default function TekomiInsider() {
 
   const setMasterRule = async (rule) => {
     if (!room) return;
-    // 固定にしたら今回のマスターを部屋主へ。それ以外はそのまま。
     const masterId = rule === "fixed" ? room.hostId : room.masterId;
-    const u = { ...room, masterRule: rule, masterId };
-    await saveRoom(ROOM, u); setRoom(u);
+    await save({ ...room, masterRule: rule, masterId });
   };
 
   const doGenWord = async () => {
     setErr("");
     const word = pickWord(cat, room?.usedWords || [], !!room?.adult);
-    const u = { ...room, wordEnc: enc(word) };
-    await saveRoom(ROOM, u); setRoom(u);
+    await save({ ...room, wordEnc: enc(word) });
   };
 
   const doStart = async () => {
     if (!room?.wordEnc) return setErr("お題を決めてね");
     if (room.players.length < 3) return setErr("3人以上ひつようだてこ");
     const nonMasters = room.players.filter((p) => p.id !== room.masterId);
-    let insiderEnc = null, followerEnc = null;
-    const isPeaceVillage = !!room.peace && Math.random() < 0.1; // 平和村は10%
+    let followerEnc = null;
+    const magic = !!room.magic;
+    const isPeaceVillage = !magic && !!room.peace && Math.random() < 0.1; // 平和村は10%
     const insider = isPeaceVillage ? null : nonMasters[Math.floor(Math.random() * nonMasters.length)];
-    insiderEnc = insider ? enc(insider.id) : null;
-    // フォロワー：6人以上＆インサイダー在のときだけ、インサイダー以外から1名
-    if (room.follower && insider && room.players.length >= 6) {
+    const insiderEnc = insider ? enc(insider.id) : null;
+    // フォロワー：6人以上＆インサイダー在のときだけ、インサイダー以外から1名（マジカル時は無し）
+    if (!magic && room.follower && insider && room.players.length >= 6) {
       const pool = nonMasters.filter((p) => p.id !== insider.id);
       if (pool.length) followerEnc = enc(pool[Math.floor(Math.random() * pool.length)].id);
     }
-    const u = { ...room, phase: "playing", insiderEnc, followerEnc, isPeaceVillage,
+    // マジカル：村人チーム全員に魔術カードを配る
+    const magicCards = {};
+    if (magic) {
+      const cards = dealMagicCards(nonMasters.length);
+      nonMasters.forEach((p, i) => { magicCards[p.id] = cards[i]; });
+    }
+    const u = { ...room, phase: "playing", insiderEnc, followerEnc, isPeaceVillage, magicCards,
       startTime: Date.now(), timeLeft: room.duration || 300, usedWords: [...(room.usedWords || []), dec(room.wordEnc)] };
     await saveRoom(ROOM, u);
     setRoom(u); setIsInsider(false); setIsFollower(false); setTimeLeft(u.duration); setS("reveal");
+  };
+
+  // ワードウルフ／ジャマーの開始（部屋主）
+  const doStartSub = async () => {
+    if (!room) return;
+    if (room.players.length < 3) return setErr("3人以上ひつようだてこ");
+    setErr("");
+    const u = game === "wordwolf" ? startWolfRound(room) : startJammerRound(room);
+    await saveRoom(ROOM, u);
+    setRoom(u); setRoleRevealed(false); setS("sub");
   };
 
   const doAsk = async () => {
     if (!qInput.trim() || !room) return;
     const qa = room.qa || [];
     if (qa.length > 0 && qa[qa.length - 1].ans === null) return;
-    const u = { ...room, qa: [...qa, { id: genId(), q: qInput.trim(), ans: null, by: myName }] };
-    await saveRoom(ROOM, u); setRoom(u); setQInput("");
+    await save({ ...room, qa: [...qa, { id: genId(), q: qInput.trim(), ans: null, by: myName }] });
+    setQInput("");
   };
 
   const doAnswer = async (ans) => {
     const qa = [...(room?.qa || [])];
     if (!qa.length || qa[qa.length - 1].ans !== null) return;
     qa[qa.length - 1] = { ...qa[qa.length - 1], ans };
-    const u = { ...room, qa };
-    await saveRoom(ROOM, u); setRoom(u);
+    await save({ ...room, qa });
   };
 
   const doWordGuessed = async () => {
@@ -595,8 +479,7 @@ export default function TekomiInsider() {
 
   const doVote = async (targetId) => {
     if (!room || room.votes?.[myId]) return;
-    const u = { ...room, votes: { ...room.votes, [myId]: targetId } };
-    await saveRoom(ROOM, u); setRoom(u);
+    await save({ ...room, votes: { ...room.votes, [myId]: targetId } });
   };
 
   // 電波不良などで全員の票が揃わないとき、主催者が今ある票で強制開票
@@ -607,11 +490,13 @@ export default function TekomiInsider() {
     setRoom(u); setS("result");
   };
 
+  // 次のラウンド（全ゲーム共通：ロビーへ戻す）
   const doNextRound = async () => {
     const newMaster = nextMaster(room.players, room.masterId, room.masterRule || "random", room.hostId);
-    const u = { ...room, phase: "lobby", round: (room.round || 1) + 1, masterId: newMaster,
-      wordEnc: null, insiderEnc: null, followerEnc: null, isPeaceVillage: false,
+    let u = { ...room, phase: "lobby", round: (room.round || 1) + 1, masterId: newMaster,
+      wordEnc: null, insiderEnc: null, followerEnc: null, isPeaceVillage: false, magicCards: {},
       startTime: null, wordGuessed: false, votes: {}, qa: [], scored: false, outcome: null };
+    u = resetWolfRound(u); u = resetJammerRound(u);
     await saveRoom(ROOM, u);
     setRoom(u); setRoleRevealed(false); setS("lobby");
   };
@@ -626,24 +511,12 @@ export default function TekomiInsider() {
 
   const doClearLeaderboard = async () => {
     if (!window.confirm("通算成績を全部消すよ？（全員ぶん・元に戻せない）")) return;
-    try { await saveLeaderboard({}); } catch {}
+    try { await saveLeaderboard({}); } catch { /* noop */ }
     setLb({});
   };
 
-  const fmt = (t) => `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
-  const Header = ({ sub, onBack }) => (
-    <div className="mp-row" style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {onBack && (
-          <button onClick={onBack} className="mp-btn mp-blue"
-            style={{ width: "auto", padding: "5px 9px", margin: 0, fontSize: 12, borderRadius: 8, boxShadow: "0 3px 0 #000,0 4px 0 #D4AF37" }}>←</button>
-        )}
-        <OwlDoc size={28} />
-        <span style={{ fontSize: 13, color: "#D4AF37", textShadow: "1px 0 0 #000,-1px 0 0 #000,0 1px 0 #000,0 -1px 0 #000,2px 2px 0 rgba(0,0,0,.6)" }}>てこみンサイダー❤</span>
-      </div>
-      <div style={{ fontSize: 10, textShadow: "1px 1px 0 #000", letterSpacing: 1 }}>{sub}</div>
-    </div>
-  );
+  const backHome = () => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) doReset(); };
+  const lbBack = () => setS(roomCode ? (room?.phase === "lobby" ? "lobby" : game === "insider" ? "result" : "sub") : "home");
 
   // ════ HOME ════
   if (screen === "home") return (
@@ -652,6 +525,7 @@ export default function TekomiInsider() {
         <Logo width={250} />
         <div style={{ display: "flex", justifyContent: "center", margin: "12px 0 6px" }}><OwlDoc size={96} bob /></div>
         <div className="mp-sub">～みんなでなぞを解け！～</div>
+        <div style={{ fontSize: 10, marginTop: 8, color: "#bbb", textShadow: "1px 1px 0 #000", letterSpacing: 1 }}>🕵️ インサイダー ／ 🐺 ワードウルフ ／ 📝 ワードジャマー</div>
       </div>
 
       {gateOpen === null ? (
@@ -688,10 +562,10 @@ export default function TekomiInsider() {
       <button className="mp-btn mp-blue" onClick={openLb}>★ つうさんせいせき</button>
       <button className="mp-btn mp-yellow" onClick={toggleSound}>{soundOn ? "🔊 こうかおん ON" : "🔇 こうかおん OFF"}</button>
 
-      {err && <div style={{ color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, textAlign: "center", padding: "8px", marginTop: 6 }}>{err}</div>}
+      <ErrBox>{err}</ErrBox>
 
       <Bubble arrow>
-        ようこそてこ！<br />なまえを入れて「みんなで あつまる」を押すてこ。はじめてなら「あそびかた」を見るといいてこ！
+        ようこそてこ！<br />なまえを入れて「はじめる」を押すてこ。ロビーで インサイダー／ワードウルフ／ワードジャマー を選べるてこ。はじめてなら「あそびかた」を見るといいてこ！
       </Bubble>
     </Shell>
   );
@@ -727,7 +601,7 @@ export default function TekomiInsider() {
     const rows = Object.entries(lb || {}).sort((a, b) => b[1].pts - a[1].pts);
     return (
       <Shell>
-        <Header sub="つうさんせいせき" onBack={() => setS(roomCode ? "result" : "home")} />
+        <Header sub="つうさんせいせき" onBack={lbBack} />
         <div className="mp-h">★ つうさん せいせき ★</div>
         <div className="mp-panel">
           {rows.length === 0 && <div style={{ color: "#666", fontSize: 13, textAlign: "center", padding: "16px 0" }}>まだ記録がないてこ</div>}
@@ -744,161 +618,178 @@ export default function TekomiInsider() {
             );
           })}
         </div>
-        <button className="mp-btn mp-yellow" onClick={() => setS(roomCode ? "result" : "home")}>◀ もどる</button>
+        <button className="mp-btn mp-yellow" onClick={lbBack}>◀ もどる</button>
         <button className="mp-btn mp-red" onClick={doClearLeaderboard} style={{ fontSize: 12 }}>🗑 通算成績をリセット</button>
       </Shell>
     );
   }
 
-  // ════ LOBBY ════
+  // ════ LOBBY（全ゲーム共通）════
   if (screen === "lobby") {
     const players = room?.players || [];
     const wordSet = !!room?.wordEnc;
     const adult = !!room?.adult;
+    const magic = !!room?.magic;
     const flair = computeFlair(players, lb);
+    const G = GAMES[game];
+    const masterName = players.find((p) => p.id === room?.masterId)?.name || "?";
+    const rule = room?.masterRule || "random";
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1}`} onBack={() => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) doReset(); }} />
+        <Header sub={`ROUND ${room?.round || 1}`} onBack={backHome} title={`てこみの ${G.label}`} />
+
+        {/* いま遊ぶゲーム */}
+        <div className="mp-panel" style={{ textAlign: "center", padding: 10, borderColor: G.color }}>
+          <span style={{ fontSize: 10, color: "#888" }}>いまのゲーム</span>
+          <div style={{ fontSize: 18, color: G.color, WebkitTextStroke: "0.4px #000" }}>{G.emoji} {G.label}</div>
+          <div style={{ fontSize: 10, color: "#666" }}>{G.desc}</div>
+        </div>
 
         <div className="mp-panel">
           <div className="mp-panel-head">★ プレイヤー {players.length}名 ★</div>
           {players.map((p) => (
             <div key={p.id} className="mp-row" style={{ padding: "6px 2px" }}>
-              <span style={{ fontSize: 13, color: p.id === room?.masterId ? "#E53935" : "#111" }}>
-                {flair[p.name] ? flair[p.name] + " " : (p.id === room?.masterId ? "🎤 " : "・ ")}{p.name}{p.id === myId ? "（あなた）" : ""}
+              <span style={{ fontSize: 13, color: game === "insider" && p.id === room?.masterId ? "#E53935" : "#111" }}>
+                {flair[p.name] ? flair[p.name] + " " : (game === "insider" && p.id === room?.masterId ? "🎤 " : "・ ")}{p.name}{p.id === myId ? "（あなた）" : ""}
               </span>
               <span style={{ fontSize: 13, color: "#D4AF37" }}>{(room?.scores || {})[p.name] || 0}pt</span>
             </div>
           ))}
-          {players.length < 3 && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 6 }}>あと{3 - players.length}名でスタートできるてこ</div>}
+          {players.length < G.min && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 6 }}>あと{G.min - players.length}名でスタートできるてこ</div>}
         </div>
 
-        {(() => {
-          const masterName = players.find((p) => p.id === room?.masterId)?.name || "?";
-          const rule = room?.masterRule || "random";
-          return (
-            <>
-              <div className="mp-panel" style={{ textAlign: "center", padding: 10 }}>
-                <span style={{ fontSize: 10, color: "#888" }}>今回のマスター（{MASTER_RULES[rule].label}）</span>
-                <div style={{ fontSize: 18, color: "#E53935", WebkitTextStroke: "0.4px #000" }}>🎤 {masterName}{room?.masterId === myId ? "（あなた）" : ""}</div>
-              </div>
+        {isHost && (
+          <div className="mp-panel">
+            <div className="mp-panel-head">★ ゲームをえらぶ（部屋主） ★</div>
+            {Object.entries(GAMES).map(([k, g]) => (
+              <ModeCard key={k} on={game === k} color={g.color} emoji={g.emoji} label={g.label} desc={g.desc} onClick={() => setGame(k)} />
+            ))}
+          </div>
+        )}
 
-              {isHost && (
-                <div className="mp-panel">
-                  <div className="mp-panel-head">★ ゲーム設定（部屋主） ★</div>
-                  <div style={{ fontSize: 10, color: "#888", marginBottom: 6, letterSpacing: 1 }}>オプション（自由にON/OFF・組み合わせOK）</div>
-                  {OPTS.map((o) => {
-                    const on = !!room[o.key];
-                    return (
-                      <div key={o.key} className="mp-modecard" onClick={() => toggleOpt(o.key)}
-                        style={{ borderColor: on ? o.color : "#000", boxShadow: on ? `0 4px 0 ${o.color}` : "0 4px 0 #000", background: on ? "#fff8e6" : "#fff" }}>
-                        <div style={{ fontSize: 22, filter: "drop-shadow(1px 1px 0 #000)" }}>{o.emoji}</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 12, fontWeight: 700 }}>{o.label}{on ? " ✓" : ""}</div>
-                          <div style={{ fontSize: 9, color: "#666", lineHeight: 1.3 }}>{o.desc}</div>
-                        </div>
-                        <div style={{ width: 34, height: 20, borderRadius: 10, position: "relative", border: "2px solid #000", background: on ? o.color : "#ccc" }}>
-                          <div style={{ position: "absolute", top: 1, left: on ? 15 : 1, width: 14, height: 14, borderRadius: "50%", background: "#fff", border: "1px solid #000" }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {room.follower && players.length < 6 && (
-                    <div style={{ fontSize: 10, color: "#a020e0", textAlign: "center", marginTop: 2 }}>※フォロワーは6人以上で有効。今は{players.length}人なので未発動</div>
-                  )}
+        {game === "insider" && (
+          <>
+            <div className="mp-panel" style={{ textAlign: "center", padding: 10 }}>
+              <span style={{ fontSize: 10, color: "#888" }}>今回の{magic ? "魔術師" : "マスター"}（{MASTER_RULES[rule].label}）</span>
+              <div style={{ fontSize: 18, color: "#E53935", WebkitTextStroke: "0.4px #000" }}>{magic ? "🧙" : "🎤"} {masterName}{room?.masterId === myId ? "（あなた）" : ""}</div>
+            </div>
 
-                  <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>マスターの決め方</div>
-                  {Object.entries(MASTER_RULES).map(([k, r]) => (
-                    <div key={k} className="mp-modecard" onClick={() => setMasterRule(k)}
-                      style={{ borderColor: rule === k ? "#D4AF37" : "#000", boxShadow: rule === k ? "0 4px 0 #D4AF37" : "0 4px 0 #000", background: rule === k ? "#eef6ff" : "#fff" }}>
-                      <div style={{ fontSize: 22, filter: "drop-shadow(1px 1px 0 #000)" }}>{r.emoji}</div>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700 }}>{r.label}{rule === k ? " ✓" : ""}</div>
-                        <div style={{ fontSize: 9, color: "#666", lineHeight: 1.3 }}>{r.desc}</div>
-                      </div>
-                    </div>
+            {isHost && (
+              <div className="mp-panel">
+                <div className="mp-panel-head">★ ゲーム設定（部屋主） ★</div>
+                <div style={{ fontSize: 10, color: "#888", marginBottom: 6, letterSpacing: 1 }}>オプション（自由にON/OFF・組み合わせOK）</div>
+                {OPTS.map((o) => (
+                  <ModeCard key={o.key} on={!!room[o.key]} color={o.color} emoji={o.emoji} label={o.label} desc={o.desc} toggle onClick={() => toggleOpt(o.key)} />
+                ))}
+                {room.follower && players.length < 6 && !magic && (
+                  <div style={{ fontSize: 10, color: "#a020e0", textAlign: "center", marginTop: 2 }}>※フォロワーは6人以上で有効。今は{players.length}人なので未発動</div>
+                )}
+                {magic && <div style={{ fontSize: 10, color: "#5b8def", textAlign: "center", marginTop: 2 }}>※マジカル中は平和村・フォロワーは使えないてこ</div>}
+
+                <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>{magic ? "魔術師" : "マスター"}の決め方</div>
+                {Object.entries(MASTER_RULES).map(([k, r]) => (
+                  <ModeCard key={k} on={rule === k} emoji={r.emoji} label={r.label} desc={r.desc} onClick={() => setMasterRule(k)} />
+                ))}
+
+                <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>せいげん時間</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {TIMES.map((t) => (
+                    <button key={t.s} onClick={() => setDuration(t.s)} style={{
+                      flex: 1, padding: "9px 0", borderRadius: 8, fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+                      border: "2.5px solid #000", boxShadow: (room.duration || 300) === t.s ? "0 3px 0 #D4AF37" : "0 3px 0 #000",
+                      background: (room.duration || 300) === t.s ? "#D4AF37" : "#fff", color: "#111" }}>{t.label}</button>
                   ))}
-
-                  <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>せいげん時間</div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {TIMES.map((t) => (
-                      <button key={t.s} onClick={() => setDuration(t.s)} style={{
-                        flex: 1, padding: "9px 0", borderRadius: 8, fontSize: 13, cursor: "pointer", fontFamily: "inherit",
-                        border: "2.5px solid #000", boxShadow: (room.duration || 300) === t.s ? "0 3px 0 #D4AF37" : "0 3px 0 #000",
-                        background: (room.duration || 300) === t.s ? "#D4AF37" : "#fff", color: "#111" }}>{t.label}</button>
-                    ))}
-                  </div>
                 </div>
-              )}
+              </div>
+            )}
 
-              {isMaster ? (
-                <>
-                  <div className="mp-panel">
-                    <div className="mp-panel-head">★ お題をきめる（あなたがマスター） ★</div>
-                    {adult ? (
-                      <div style={{ fontSize: 11, color: "#a020e0", textAlign: "center", marginBottom: 10, lineHeight: 1.5 }}>
-                        🌶️ アダルト専用のきわどいお題から出るてこ<br />（カテゴリは選べないてこ）
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
-                        {CATS.map((c) => (
-                          <button key={c} onClick={() => setCat(c)} style={{
-                            padding: "6px 10px", borderRadius: 8, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-                            border: `2.5px solid #000`, boxShadow: "0 2px 0 #000",
-                            background: cat === c ? "#D4AF37" : "#fff", color: "#111" }}>{c}</button>
-                        ))}
-                      </div>
-                    )}
-                    <button className="mp-btn mp-yellow" onClick={doGenWord}>🎲 お題をひく</button>
-                    {wordSet && (
-                      <div style={{ textAlign: "center", padding: 10, background: "#fff8dc", border: "3px solid #000", borderRadius: 8, marginBottom: 4 }}>
-                        <span style={{ fontSize: 9, color: "#888" }}>いまのお題　</span>
-                        <span style={{ fontSize: 20, color: "#E53935", WebkitTextStroke: "0.5px #000" }}>「{dec(room.wordEnc)}」</span>
-                      </div>
-                    )}
-                  </div>
-                  <button className="mp-btn mp-red" onClick={doStart} disabled={!wordSet || players.length < 3}>
-                    {players.length < 3 ? `あと${3 - players.length}名` : !wordSet ? "お題をきめてね" : "▶ ゲームスタート！"}
-                  </button>
-                  {err && <div style={{ color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, textAlign: "center", padding: 7, marginBottom: 10 }}>{err}</div>}
-                </>
-              ) : (
-                <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 12, padding: 22 }}>
-                  🎤 {masterName} がお題を準備中…<br />
-                  <span style={{ fontSize: 11, color: "#D4AF37" }}>モード：{optsSummary(room)}</span><br />
-                  <span style={{ fontSize: 11 }}>{wordSet ? "お題は準備OK" : "お題をえらび中"}</span>
+            {isMaster ? (
+              <>
+                <div className="mp-panel">
+                  <div className="mp-panel-head">★ お題をきめる（あなたが{magic ? "魔術師" : "マスター"}） ★</div>
+                  {adult ? (
+                    <div style={{ fontSize: 11, color: "#a020e0", textAlign: "center", marginBottom: 10, lineHeight: 1.5 }}>
+                      🌶️ アダルト専用のきわどいお題から出るてこ<br />（カテゴリは選べないてこ）
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
+                      {CATS.map((c) => (
+                        <button key={c} onClick={() => setCat(c)} style={{
+                          padding: "6px 10px", borderRadius: 8, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                          border: `2.5px solid #000`, boxShadow: "0 2px 0 #000",
+                          background: cat === c ? "#D4AF37" : "#fff", color: "#111" }}>{c}</button>
+                      ))}
+                    </div>
+                  )}
+                  <button className="mp-btn mp-yellow" onClick={doGenWord}>🎲 お題をひく</button>
+                  {wordSet && (
+                    <div style={{ textAlign: "center", padding: 10, background: "#fff8dc", border: "3px solid #000", borderRadius: 8, marginBottom: 4 }}>
+                      <span style={{ fontSize: 9, color: "#888" }}>いまのお題　</span>
+                      <span style={{ fontSize: 20, color: "#E53935", WebkitTextStroke: "0.5px #000" }}>「{dec(room.wordEnc)}」</span>
+                    </div>
+                  )}
                 </div>
-              )}
+                <button className="mp-btn mp-red" onClick={doStart} disabled={!wordSet || players.length < 3}>
+                  {players.length < 3 ? `あと${3 - players.length}名` : !wordSet ? "お題をきめてね" : "▶ ゲームスタート！"}
+                </button>
+                <ErrBox>{err}</ErrBox>
+              </>
+            ) : (
+              <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 12, padding: 22 }}>
+                {magic ? "🧙" : "🎤"} {masterName} がお題を準備中…<br />
+                <span style={{ fontSize: 11, color: "#D4AF37" }}>モード：{optsSummary(room)}</span><br />
+                <span style={{ fontSize: 11 }}>{wordSet ? "お題は準備OK" : "お題をえらび中"}</span>
+              </div>
+            )}
+            <PointsPanel magic={magic} />
+          </>
+        )}
 
-              {isHost && <button className="mp-btn mp-blue" onClick={doResetRoom}>🔄 部屋をリセット</button>}
-            </>
-          );
-        })()}
-        <PointsPanel />
+        {game === "wordwolf" && (
+          <WolfSettings room={room} isHost={isHost} save={save} onStart={doStartSub} err={err} />
+        )}
+        {game === "jammer" && (
+          <JammerSettings room={room} isHost={isHost} save={save} onStart={doStartSub} err={err} />
+        )}
+
+        {isHost && <button className="mp-btn mp-blue" onClick={doResetRoom}>🔄 部屋をリセット</button>}
         <Bubble>
-          {isMaster ? "キミが今回のマスター！お題を引いてスタートだてこ！" : isHost ? "設定はキミ（部屋主）が管理てこ。マスターがお題を引くのを待つてこ" : "今回のマスターが準備中てこ。ちょっと待つてこ🍺"}
+          {game !== "insider"
+            ? (isHost ? `${G.label}だてこ！設定を決めて「スタート」を押すてこ` : `今回は${G.label}だてこ。部屋主のスタートを待つてこ🍺`)
+            : isMaster ? (magic ? "キミが今回の魔術師！お題を引いてスタートだてこ。村人チームの中のインサイダーを見破るてこ！" : "キミが今回のマスター！お題を引いてスタートだてこ！")
+            : isHost ? "設定はキミ（部屋主）が管理てこ。マスターがお題を引くのを待つてこ" : "今回のマスターが準備中てこ。ちょっと待つてこ🍺"}
         </Bubble>
       </Shell>
     );
   }
 
-  // ── 役職判定 ──
-  let role = "common";
-  if (isMaster) role = "master";
+  // ════ ワードウルフ／ワードジャマー（各モジュールへ委譲）════
+  if (screen === "sub") {
+    const common = { room, myId, myName, isHost, save, lb, onNextRound: doNextRound, onLeave: doReset, openLb };
+    return game === "wordwolf" ? <WolfGame {...common} /> : <JammerGame {...common} />;
+  }
+
+  // ── 役職判定（インサイダー）──
+  const magic = !!room?.magic;
+  let role;
+  if (isMaster) role = magic ? "wizard" : "master";
   else if (isFollower) role = "follower";
-  else role = isInsider ? "insider" : "common";
-  const knowsWord = role === "master" || role === "insider";
+  else role = isInsider ? "insider" : (magic ? "villager" : "common");
+  const knowsWord = ["master", "wizard", "insider"].includes(role);
+  const myCard = room?.magicCards?.[myId];
+  const insName = room?.players?.find((p) => p.id === dec(room?.insiderEnc || ""))?.name;
 
   // ════ REVEAL ════
   if (screen === "reveal") {
     const word = dec(room?.wordEnc || "");
-    const insName = room?.players?.find((p) => p.id === dec(room?.insiderEnc || ""))?.name;
     const folName = room?.players?.find((p) => p.id === dec(room?.followerEnc || ""))?.name;
     const roleMeta = {
-      master:        { name: "マスター", color: "#D4AF37", desc: "質問に YES / NO で答えるてこ" },
-      insider:       { name: "インサイダー", color: "#E53935", desc: "正体を隠して、みんなをお題へ導くてこ" },
-      common:        { name: "コモン", color: "#D4AF37", desc: "質問でお題を当てて、潜入者を暴くてこ" },
-      follower:      { name: "フォロワー", color: "#a020e0", desc: "お題は知らないが、インサイダーの味方てこ" },
+      master:   { name: "マスター", color: "#D4AF37", desc: "質問に YES / NO で答えるてこ" },
+      wizard:   { name: "魔術師", color: "#5b8def", desc: "質問に YES / NO で答え、最後にインサイダーを見破るてこ" },
+      insider:  { name: "インサイダー", color: "#E53935", desc: magic ? "村人はキミが誰か知ってる。魔術師にだけバレないように導くてこ" : "正体を隠して、みんなをお題へ導くてこ" },
+      common:   { name: "コモン", color: "#D4AF37", desc: "質問でお題を当てて、潜入者を暴くてこ" },
+      villager: { name: "村人", color: "#5b8def", desc: "お題は知らない。インサイダーをかばいながらお題を当てるてこ" },
+      follower: { name: "フォロワー", color: "#a020e0", desc: "お題は知らないが、インサイダーの味方てこ" },
     }[role];
     return (
       <Shell>
@@ -922,16 +813,23 @@ export default function TekomiInsider() {
                 {knowsWord ? `「${word}」` : <Redacted />}
               </div>
             </div>
-            {role === "follower" && insName && (
-              <div className="mp-panel" style={{ padding: 12, border: "5px solid #a020e0", marginTop: -2 }}>
-                <span style={{ fontSize: 10, color: "#888" }}>味方のインサイダーは…　</span>
-                <span style={{ fontSize: 18, color: "#a020e0", WebkitTextStroke: "0.4px #000" }}>{insName}</span>
+            {(role === "follower" || role === "villager") && insName && (
+              <div className="mp-panel" style={{ padding: 12, border: `5px solid ${roleMeta.color}`, marginTop: -2 }}>
+                <span style={{ fontSize: 10, color: "#888" }}>{role === "villager" ? "インサイダーは…　" : "味方のインサイダーは…　"}</span>
+                <span style={{ fontSize: 18, color: roleMeta.color, WebkitTextStroke: "0.4px #000" }}>{insName}</span>
               </div>
             )}
             {role === "insider" && folName && (
               <div className="mp-panel" style={{ padding: 12, border: "5px solid #a020e0", marginTop: -2 }}>
                 <span style={{ fontSize: 10, color: "#888" }}>あなたのフォロワーは…　</span>
                 <span style={{ fontSize: 18, color: "#a020e0", WebkitTextStroke: "0.4px #000" }}>{folName}</span>
+              </div>
+            )}
+            {magic && myCard && (
+              <div className="mp-panel" style={{ padding: 12, border: "5px solid #5b8def", marginTop: -2, background: "#eef4ff" }}>
+                <div style={{ fontSize: 10, color: "#888" }}>🪄 あなたの魔術カード</div>
+                <div style={{ fontSize: 20, color: "#5b8def", WebkitTextStroke: "0.4px #000" }}>{myCard.t}</div>
+                <div style={{ fontSize: 11, color: "#333" }}>{myCard.d}</div>
               </div>
             )}
             <button className="mp-btn mp-green" onClick={() => setS("game")}>▶ 任務開始！</button>
@@ -946,8 +844,8 @@ export default function TekomiInsider() {
     const qa = room?.qa || [];
     const pending = qa.length > 0 && qa[qa.length - 1].ans === null;
     const word = dec(room?.wordEnc || "");
-    const roleLabel = { master: "マスター", insider: "インサイダー", common: "コモン", follower: "フォロワー" }[role];
-    const roleColor = role === "master" ? "#D4AF37" : role === "insider" ? "#E53935" : role === "follower" ? "#a020e0" : "#D4AF37";
+    const roleLabel = { master: "マスター", wizard: "魔術師", insider: "インサイダー", common: "コモン", villager: "村人", follower: "フォロワー" }[role];
+    const roleColor = { master: "#D4AF37", wizard: "#5b8def", insider: "#E53935", common: "#D4AF37", villager: "#5b8def", follower: "#a020e0" }[role];
     return (
       <Shell>
         <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12 }}>
@@ -963,6 +861,16 @@ export default function TekomiInsider() {
             <span style={{ fontSize: 10, color: "#888" }}>お題　</span>
             <span style={{ fontSize: 18, color: roleColor, WebkitTextStroke: "0.4px #000" }}>「{word}」</span>
           </div>
+        )}
+        {magic && myCard && (
+          <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12, background: "#eef4ff", borderColor: "#5b8def" }}>
+            <span style={{ fontSize: 10, color: "#888" }}>🪄 魔術カード　</span>
+            <span style={{ fontSize: 14, color: "#5b8def", WebkitTextStroke: "0.3px #000" }}>{myCard.t}</span>
+            <span style={{ fontSize: 10, color: "#333" }}>　{myCard.d}</span>
+          </div>
+        )}
+        {magic && role === "villager" && insName && (
+          <div style={{ fontSize: 10, color: "#bbb", textAlign: "center", marginBottom: 8, textShadow: "1px 1px 0 #000" }}>インサイダーは {insName}。魔術師にバレないようにかばうてこ</div>
         )}
 
         <div className="mp-panel" style={{ maxHeight: 300, overflowY: "auto" }}>
@@ -997,16 +905,16 @@ export default function TekomiInsider() {
         )}
 
         {isMaster && <>
-          <button className="mp-btn mp-green" onClick={doWordGuessed}>✓ お題的中 → 投票へ</button>
+          <button className="mp-btn mp-green" onClick={doWordGuessed}>{magic ? "✓ お題的中 → インサイダーを指名へ" : "✓ お題的中 → 投票へ"}</button>
           <button className="mp-btn mp-yellow" onClick={doExtend}>⏱ 1分 延長する</button>
           {timeLeft === 0 && <button className="mp-btn mp-red" onClick={doTimeUp}>⏰ 時間切れ → 結果へ</button>}
         </>}
         {!isMaster && timeLeft === 0 && (
-          <div style={{ textAlign: "center", color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, padding: 8, marginBottom: 8 }}>時間切れ。マスターの操作を待つてこ</div>
+          <div style={{ textAlign: "center", color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, padding: 8, marginBottom: 8 }}>時間切れ。{magic ? "魔術師" : "マスター"}の操作を待つてこ</div>
         )}
         {isHost && !isMaster && (
           <div style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 10, color: "#fff", textShadow: "1px 1px 0 #000", textAlign: "center", marginBottom: 4 }}>主催者の強制進行（マスターが反応しない時）</div>
+            <div style={{ fontSize: 10, color: "#fff", textShadow: "1px 1px 0 #000", textAlign: "center", marginBottom: 4 }}>主催者の強制進行（{magic ? "魔術師" : "マスター"}が反応しない時）</div>
             <button className="mp-btn mp-red" onClick={doWordGuessed}>⏩ 強制で投票へ</button>
             <button className="mp-btn mp-red" onClick={doTimeUp}>⏩ 強制で結果へ（時間切れ扱い）</button>
           </div>
@@ -1019,7 +927,7 @@ export default function TekomiInsider() {
   if (screen === "vote") {
     const votable = (room?.players || []).filter((p) => p.id !== room?.masterId && p.id !== myId);
     const voteCount = Object.keys(room?.votes || {}).length;
-    const totalVoters = (room?.players || []).length; // マスター含め全員が投票
+    const totalVoters = magic ? 1 : (room?.players || []).length; // 通常はマスター含め全員／マジカルは魔術師のみ
     const myVote = room?.votes?.[myId];
     return (
       <Shell>
@@ -1027,11 +935,13 @@ export default function TekomiInsider() {
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}><OwlDoc size={70} bob expr="suspicious" /></div>
           <div className="mp-title" style={{ fontSize: 22 }}>お題は暴かれた！</div>
           <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>
-            潜入者は誰だ。一斉投票せよ！
+            {magic ? "魔術師よ、インサイダーを見破れ！" : "潜入者は誰だ。一斉投票せよ！"}
           </div>
           <div style={{ fontSize: 11, marginTop: 8, letterSpacing: 2, textShadow: "1px 1px 0 #000" }}>{voteCount} / {totalVoters} 票</div>
         </div>
-        {myVote ? (
+        {magic && !isMaster ? (
+          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>🧙 魔術師が推理中…<br /><span style={{ fontSize: 11 }}>ポーカーフェイスで待つてこ</span></div>
+        ) : myVote ? (
           <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>✓ 投票完了。開票を待つてこ</div>
         ) : (
           <div className="mp-panel">
@@ -1039,7 +949,7 @@ export default function TekomiInsider() {
             {votable.map((p) => (
               <button key={p.id} className="mp-btn mp-blue" onClick={() => doVote(p.id)}>{p.name}</button>
             ))}
-            {room?.peace && (
+            {room?.peace && !magic && (
               <button className="mp-btn mp-green" onClick={() => doVote(NONE_ID)}>✅ インサイダーはいない（平和村）</button>
             )}
           </div>
@@ -1060,18 +970,19 @@ export default function TekomiInsider() {
     const insiderPlayer = room?.players?.find((p) => p.id === insiderId);
     const word = dec(room?.wordEnc || "");
     const votes = room?.votes || {};
-    const vc = {};
-    Object.values(votes).forEach((t) => { vc[t] = (vc[t] || 0) + 1; });
+    const { vc } = topVote(votes);
     const oc = room?.outcome;
     const titleMap = {
       commons: "コモンの勝利！", insider: "インサイダーの勝利！", timeout: "時間切れ — 失敗…",
       peace_win: "平和村 — 村の勝利！", peace_lose: "平和村 — 村の失敗…", peace_timeout: "時間切れ — 失敗…",
+      magic_village: "村人チームの勝利！", magic_wizard: "魔術師の勝利！", magic_timeout: "時間切れ — 魔術師の勝利…",
     };
     const title = titleMap[oc] || "結果";
-    const tcol = (oc === "commons" || oc === "peace_win") ? "#D4AF37" : "#E53935";
+    const tcol = ["commons", "peace_win", "magic_village"].includes(oc) ? "#D4AF37" : "#E53935";
+    const flair = computeFlair(room?.players || [], lb);
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1} 結果`} onBack={() => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) doReset(); }} />
+        <Header sub={`ROUND ${room?.round || 1} 結果`} onBack={backHome} />
         <div style={{ textAlign: "center", padding: "10px 0 18px" }}>
           <div className="mp-title" style={{ fontSize: 24, color: tcol }}>{title}</div>
           <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>
@@ -1092,28 +1003,19 @@ export default function TekomiInsider() {
               <OwlDoc size={40} />
               <span style={{ fontSize: 24, color: "#E53935", WebkitTextStroke: "0.5px #000" }}>{insiderPlayer?.name || "?"}</span>
             </div>
+            {magic && oc !== "magic_timeout" && (
+              <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+                魔術師の指名 → <b>{room?.players?.find((p) => p.id === votes[room.masterId])?.name || "（なし）"}</b>
+              </div>
+            )}
           </div>
         )}
 
-        <div className="mp-panel">
-          <div className="mp-panel-head">★ とくてん ★</div>
-          {(() => {
-            const flair = computeFlair(room?.players || [], lb);
-            return (room?.players || []).map((p) => (
-              <div key={p.id} className="mp-row" style={{ padding: "7px 0", borderBottom: "2px dashed #ddd" }}>
-                <div style={{ flex: 1 }}>
-                  <span style={{ fontSize: 13, color: (!isPeace && p.id === insiderId) ? "#E53935" : p.id === room.masterId ? "#D4AF37" : "#111" }}>
-                    {flair[p.name] ? flair[p.name] + " " : (p.id === room.masterId ? "🎤 " : "")}{p.name}{p.id === myId ? "（あなた）" : ""}
-                  </span>
-                  {vc[p.id] ? <span style={{ fontSize: 10, color: "#888" }}>　{vc[p.id]}票</span> : null}
-                </div>
-                <div style={{ fontSize: 18, color: "#D4AF37", WebkitTextStroke: "0.4px #000" }}>{(room?.scores || {})[p.name] || 0}<span style={{ fontSize: 9, color: "#888" }}>pt</span></div>
-              </div>
-            ));
-          })()}
-        </div>
+        <ScoreRows players={room?.players || []} scores={room?.scores} myId={myId} flair={flair}
+          colorOf={(p) => (!isPeace && p.id === insiderId) ? "#E53935" : p.id === room.masterId ? (magic ? "#5b8def" : "#D4AF37") : "#111"}
+          extra={(p) => vc[p.id] ? <span style={{ fontSize: 10, color: "#888" }}>　{vc[p.id]}票</span> : null} />
 
-        {Object.keys(votes).length > 0 && (
+        {Object.keys(votes).length > 0 && !magic && (
           <div className="mp-panel">
             <div className="mp-panel-head" style={{ background: "#D4AF37" }}>★ だれが だれに ★</div>
             {(room?.players || []).filter((p) => votes[p.id]).map((p) => {
