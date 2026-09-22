@@ -46,6 +46,13 @@ const MASTER_RULES = {
 
 const TIMES = [{ s: 300, label: "5分" }, { s: 420, label: "7分" }, { s: 540, label: "9分" }];
 
+// 残り時間は startTime を正として各端末が自分で計算する。
+// （マスターの端末がスリープしても全員の時計が止まらない。延長は duration を伸ばす）
+const calcLeft = (d) => {
+  if (!d?.startTime) return d?.duration || 300;
+  return Math.max(0, (d.duration || 300) - Math.floor((Date.now() - d.startTime) / 1000));
+};
+
 // 次のマスターを決める
 function nextMaster(players, curId, rule, hostId) {
   if (!players || players.length === 0) return hostId;
@@ -284,31 +291,22 @@ export default function TekomiInsider() {
       if (data.phase === "playing" && cur === "lobby") { setRoleRevealed(false); setS("reveal"); }
       if (data.phase === "vote" && (cur === "game" || cur === "reveal")) setS("vote");
       if (data.phase === "result" && cur !== "result") setS("result");
-      // 残り時間はマスターが正。非マスターはマスターの配信値（timeLeft）を表示するだけ。
-      if (data.phase === "playing") {
-        if (data.masterId !== myId) {
-          const t = typeof data.timeLeft === "number"
-            ? data.timeLeft
-            : Math.max(0, (data.duration || 300) - Math.floor((Date.now() - (data.startTime || Date.now())) / 1000));
-          setTimeLeft(Math.max(0, t));
-        }
-      }
+      // 残り時間は全員が startTime から計算する（誰かの端末が止まっても影響しない）
+      if (data.phase === "playing") setTimeLeft(calcLeft(data));
     });
     return () => unsub();
   }, [roomCode, myId, finalize]);
 
-  // マスターだけが時計を進め、毎秒Firebaseへ配信（全員が同じ残り時間を見る）
+  // 各端末が自分で1秒ごとに再計算する（配信に頼らないので、誰かの画面が寝ても止まらない）
   const tlRef = useRef(0);
   tlRef.current = timeLeft;
+  const roomRef = useRef(null);
+  roomRef.current = room;
   useEffect(() => {
-    if (screen !== "game" || !isMaster) return;
-    const id = setInterval(() => {
-      const n = Math.max(0, tlRef.current - 1);
-      setTimeLeft(n);
-      setRoomField(ROOM, "timeLeft", n);
-    }, 1000);
+    if (screen !== "game") return;
+    const id = setInterval(() => setTimeLeft(calcLeft(roomRef.current)), 1000);
     return () => clearInterval(id);
-  }, [screen, isMaster]);
+  }, [screen]);
 
   // ── actions ──
   const freshRoom = (name, uid = myId) => ({
@@ -388,10 +386,8 @@ export default function TekomiInsider() {
 
   const doExtend = async () => {
     if (!room) return;
-    const n = tlRef.current + 60;
-    setTimeLeft(n);
-    await setRoomField(ROOM, "duration", (room.duration || 300) + 60);
-    await setRoomField(ROOM, "timeLeft", n); // 全員へ即同期
+    setTimeLeft(tlRef.current + 60);
+    await setRoomField(ROOM, "duration", (room.duration || 300) + 60); // 全員の計算結果が伸びる
   };
 
   const setMasterRule = async (rule) => {

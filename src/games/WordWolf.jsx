@@ -1,6 +1,6 @@
 // ワードウルフ：全員にお題が配られるが、1人（7人以上なら2人）だけ違うお題＝ウルフ。
 // 話し合いでウルフを見つけて投票。ウルフが吊られても、多数派のお題を言い当てれば逆転勝ち。
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { setRoomField } from "../lib/db";
 import { pickWolfPair } from "../lib/words";
 import { applyLeaderboard, addScores } from "../lib/scoring";
@@ -20,11 +20,12 @@ export function startWolfRound(room) {
     ...room,
     phase: "playing", votes: {}, scored: false, outcome: null,
     startTime: Date.now(), timeLeft: room.wolfDuration || 180,
+    wolfEndAt: Date.now() + (room.wolfDuration || 180) * 1000, // 話し合いの終了時刻（各端末がこれを見て計算）
     usedPairs: [...(room.usedPairs || []), [maj, min].sort().join("|")],
     wolf: { majEnc: enc(maj), minEnc: enc(min), wolvesEnc: enc(JSON.stringify(wolves)), caughtId: null, guess: null },
   };
 }
-export function resetWolfRound(room) { return { ...room, wolf: null }; }
+export function resetWolfRound(room) { return { ...room, wolf: null, wolfEndAt: null }; }
 
 const wolvesOf = (room) => { try { return JSON.parse(dec(room?.wolf?.wolvesEnc || "")) || []; } catch { return []; } };
 
@@ -87,19 +88,16 @@ export function WolfGame({ room, myId, myName, isHost, save, lb, onNextRound, on
   const maj = dec(room?.wolf?.majEnc || "");
   const min = dec(room?.wolf?.minEnc || "");
   const myWord = amWolf ? min : maj;
-  const timeLeft = typeof room?.timeLeft === "number" ? room.timeLeft : (room?.wolfDuration || 180);
-
-  // 部屋主だけが時計を進めて毎秒配信
-  const tl = useRef(timeLeft);
-  useEffect(() => { tl.current = timeLeft; }, [timeLeft]);
+  // 残り時間は終了時刻（wolfEndAt）から各端末が自分で計算する。
+  // 部屋主の端末がスリープしても、全員の時計は止まらない。
+  const endAt = room?.wolfEndAt;
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (phase !== "playing" || !isHost) return;
-    const id = setInterval(() => {
-      const n = Math.max(0, tl.current - 1);
-      setRoomField(ROOM, "timeLeft", n);
-    }, 1000);
+    if (phase !== "playing") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [phase, isHost]);
+  }, [phase]);
+  const timeLeft = endAt ? Math.max(0, Math.round((endAt - now) / 1000)) : (room?.wolfDuration || 180);
 
   // 採点して結果へ
   const finalize = async (data, outcome) => {
@@ -118,7 +116,7 @@ export function WolfGame({ room, myId, myName, isHost, save, lb, onNextRound, on
   };
 
   const toVote = async () => { await save({ ...room, phase: "vote", votes: {} }); };
-  const extend = async () => { await setRoomField(ROOM, "timeLeft", tl.current + 60); };
+  const extend = async () => { await setRoomField(ROOM, "wolfEndAt", (room?.wolfEndAt || Date.now()) + 60000); };
 
   // 投票が揃ったら（最後に投票した人の端末が）開票
   const tally = async (data) => {
