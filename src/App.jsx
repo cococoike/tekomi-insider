@@ -105,6 +105,8 @@ export default function TekomiInsider() {
   const setS = (s) => { screenRef.current = s; setScreen(s); };
 
   const [myName, setMyName] = useState("");
+  const myNameRef = useRef("");
+  myNameRef.current = myName;
   const [isMaster, setIsMaster] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [isInsider, setIsInsider] = useState(false);
@@ -262,6 +264,15 @@ export default function TekomiInsider() {
     const unsub = subscribeRoom(roomCode, async (data) => {
       const cur = screenRef.current;
       if (cur === "home" || cur === "lb" || cur === "tutorial" || !data) return;
+      // 主催者が部屋をリセットすると、入っていた人は players から消える。
+      // そのままでは自分のいないロビーを眺め続けることになるので、ホームへ戻して入り直してもらう。
+      if (Array.isArray(data.players) && !data.players.some((p) => p.id === myId)) {
+        const prevName = myNameRef.current;
+        doReset();
+        setFName(prevName || "");
+        setErr("部屋がリセットされたてこ。もう一度「はじめる」で入ってね");
+        return;
+      }
       setIsMaster(data.masterId === myId);
       setIsHost(data.hostId === myId);
       setIsInsider(data.insiderEnc ? dec(data.insiderEnc) === myId : false);
