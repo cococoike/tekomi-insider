@@ -294,7 +294,7 @@ export default function Guide({ onClose, onTab }) {
               <span style={{ fontSize: 26, filter: "drop-shadow(1px 1px 0 #000)" }}>🔞</span>
               <div style={{ flex: 1 }}>
                 <div className="gd-name">アダルト</div>
-                <div className="gd-desc">お題が下ネタ寄りの専用リストだけになる。ワードウルフ・ワードジャマーにも同時に効く。<b>初対面の人がいる席ではOFF</b>にしておくこと。</div>
+                <div className="gd-desc">インサイダーとワードウルフのお題が、下ネタ寄りの専用リストだけに入れ替わる。ワードジャマーは通常の質問に成人向けの質問が<b>加わる</b>（混ざる）。<b>初対面の人がいる席ではOFF</b>にしておくこと。</div>
               </div>
             </div>
           </Panel>
