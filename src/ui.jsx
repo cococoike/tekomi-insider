@@ -90,6 +90,32 @@ export const CSS = `
   border:3px solid #000; border-radius:12px; padding:9px 10px; margin-bottom:9px; cursor:pointer;
   box-shadow:0 4px 0 #000; background:#fff; color:#111; font-family:inherit; }
 .mp-modecard:active { transform:translateY(3px); box-shadow:none; }
+/* ── あそびかた（ビジュアル説明書）── */
+.gd-tabs { display:flex; gap:5px; overflow-x:auto; padding-bottom:6px; margin-bottom:12px; }
+.gd-tab { flex:0 0 auto; font-family:inherit; font-size:11px; padding:7px 10px 6px; border:2.5px solid #000;
+  border-radius:9px; background:#2a2a2a; color:#ddd; box-shadow:0 3px 0 #000; cursor:pointer; letter-spacing:1px; }
+.gd-tab.on { background:linear-gradient(180deg,#f1d885,#D4AF37 60%,#937017); color:#1a1200; box-shadow:0 3px 0 #5e4810; }
+.gd-card { display:flex; gap:10px; align-items:flex-start; background:#fff; border:3px solid #000; border-radius:12px;
+  box-shadow:0 4px 0 #000; padding:9px 10px; }
+.gd-avatar { position:relative; flex:0 0 auto; }
+.gd-badge { position:absolute; right:-6px; bottom:-5px; font-size:15px; filter:drop-shadow(1px 1px 0 #000); }
+.gd-name { font-size:12px; letter-spacing:1px; }
+.gd-desc { font-size:10.5px; color:#555; line-height:1.55; margin-top:2px; }
+.gd-step { display:grid; grid-template-columns:30px 1fr; gap:9px; align-items:start; padding:7px 0; border-bottom:2px dashed #ddd; }
+.gd-step:last-child { border-bottom:none; }
+.gd-num { font-size:13px; color:#D4AF37; background:#1a1a1a; border:2px solid #000; border-radius:7px;
+  text-align:center; line-height:26px; height:28px; }
+.gd-step-t { font-size:12px; color:#111; }
+.gd-step-d { font-size:10.5px; color:#555; line-height:1.55; }
+.gd-pt { display:flex; gap:8px; align-items:center; padding:7px 0; border-bottom:2px dashed #ddd; }
+.gd-pt:last-child { border-bottom:none; }
+.gd-pt-t { flex:1; font-size:11px; color:#111; line-height:1.5; }
+.gd-chip { flex:0 0 auto; font-size:11px; border:2px solid #000; border-radius:7px; padding:3px 7px;
+  box-shadow:0 2px 0 #000; white-space:nowrap; }
+.gd-plus { background:#D4AF37; color:#1a1200; }
+.gd-minus { background:#E53935; color:#fff; }
+.gd-zero { background:#ccc; color:#333; }
+.gd-grid { display:grid; grid-template-columns:1fr; gap:8px; }
 `;
 
 export const STARS = [
@@ -140,16 +166,18 @@ export const FACES = {
   thinking:   [[4,9,2,1,"E"],[10,9,2,1,"E"],[7,12,3,1,"E"]],
   suspicious: [[3,10,3,1,"E"],[10,10,3,1,"E"],[8,12,3,1,"E"],[10,11,1,1,"E"]],
 };
-export const OwlDoc = ({ size = 54, bob = false, expr = "normal" }) => {
+// pal で色を差し替えると「役職ちがいのてこみん」になる（W=体/帽・G=星や服の縁・S=顔）
+export const OwlDoc = ({ size = 54, bob = false, expr = "normal", pal = null }) => {
+  const P = pal ? { ...PX, ...pal } : PX;
   const e = EXPRS.includes(expr) ? expr : "normal";
   const cells = [];
   BASE.forEach((row, y) => {
     for (let x = 0; x < row.length; x++) {
-      const c = PX[row[x]];
+      const c = P[row[x]];
       if (c) cells.push(<rect key={`b${x}-${y}`} x={x} y={y} width={1.02} height={1.02} fill={c} />);
     }
   });
-  FACES[e].forEach(([x, y, w, h, k], i) => cells.push(<rect key={`f${i}`} x={x} y={y} width={w} height={h} fill={PX[k]} />));
+  FACES[e].forEach(([x, y, w, h, k], i) => cells.push(<rect key={`f${i}`} x={x} y={y} width={w} height={h} fill={P[k]} />));
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" className={bob ? "tk-hop" : ""}
       shapeRendering="crispEdges" style={{ display: "block", filter: "drop-shadow(1px 1.5px 0 rgba(0,0,0,.55))" }}>

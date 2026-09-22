@@ -9,6 +9,7 @@
 
 ## 場所・実行・デプロイ
 - プロジェクト正本: GitHub `cococoike/tekomi-insider`。ローカル作業コピーは `G:\マイドライブ\nakimushi-works\games\tekomi-insider`（Google Drive。**node_modules / dist は Drive に置かない**。開発時は別フォルダへ clone して作業し、ソースだけ Drive に戻す運用でもOK）
+- Node は Drive 外の作業コピーで動かす（例: `scratchpad/build` へコピー → `npm ci` → `npm run build` / `npm run dev:mock`）。**Drive 上で `npm install` しない**
 - 開発: `npm run dev`（http://localhost:5173/ ）/ ビルド: `npm run build`
 - 動作確認（Firebase なし）: `npm run dev:mock`（http://localhost:5199/ ）。`src/lib/db.mock.js` のメモリDBに差し替わる。ブラウザのコンソールで `window.__db.loadRoom('main')` / `window.__db.saveRoom('main', data)` を使うと偽プレイヤーや票を注入して1台で全画面を確認できる
 - 本番: **Vercel** が GitHub `cococoike/tekomi-insider` の main push で自動デプロイ。URL = https://tekomi-insider.vercel.app
@@ -23,6 +24,7 @@
 
 ## 構成
 - `src/App.jsx` … ホーム／チュートリアル／通算成績／**共通ロビー**（ゲーム切替・設定）／インサイダー本体（役職配布・質問・投票・採点）
+- `src/Guide.jsx` … ビジュアル説明書「あそびかた」（タブ5枚：はじめに／インサイダー／ウルフ／ジャマー／オプション）。役職は `OwlDoc` の `pal` で色替えしたてこみん＋絵文字バッジで見せる。ホームとロビーの「📖 あそびかた」から開く（旧テキスト送りの `TUTORIAL` は廃止）
 - `src/ui.jsx` … 共通UI（CSS文字列・てこみんSVG `OwlDoc`・`Shell`/`Bubble`/`Header`/`ModeCard`/`ScoreRows`）と小道具（`enc/dec`・`computeFlair`・`topVote`）
 - `src/games/WordWolf.jsx` … ワードウルフ（設定パネル `WolfSettings`・本体 `WolfGame`・`startWolfRound`）
 - `src/games/WordJammer.jsx` … ワードジャマー（`JammerSettings`・`JammerGame`・`startJammerRound`）

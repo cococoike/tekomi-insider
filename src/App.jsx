@@ -4,6 +4,7 @@ import { pickWord, dealMagicCards } from "./lib/words";
 import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
 import { applyLeaderboard, addScores } from "./lib/scoring";
 import { genId, ROOM, enc, dec, fmt, computeFlair, topVote, OwlDoc, Logo, Bubble, Shell, Redacted, Header, ErrBox, ScoreRows, ModeCard } from "./ui";
+import Guide from "./Guide";
 import { WolfSettings, WolfGame, startWolfRound, resetWolfRound } from "./games/WordWolf";
 import { JammerSettings, JammerGame, startJammerRound, resetJammerRound } from "./games/WordJammer";
 
@@ -56,16 +57,6 @@ function nextMaster(players, curId, rule, hostId) {
   return pool[Math.floor(Math.random() * pool.length)].id;
 }
 
-const TUTORIAL = [
-  "ようこそ『てこみンサイダーゲーム』へてこ！これは“知ってるフリ”を見破る心理ゲームだてこ。3人以上で遊べるてこ。",
-  "役は3つあるてこ。【マスター】はお題を知ってて質問に答える人。【インサイダー】もお題を知ってるけど正体はナイショ。【コモン】はお題を知らずに当てにいく人だてこ。",
-  "コモンが質問して、マスターがYES/NOで答えるてこ。制限時間内にみんなでお題を当てるのが目標だてこ。",
-  "でも、インサイダーが紛れてる…！お題が当たったら、全員で『インサイダーは誰だ？』と一斉投票するてこ。",
-  "見破れたらコモンの勝ち、逃げ切ればインサイダーの勝ちだてこ。飲みながら、疑いながらワイワイやるのが一番てこ🍺",
-  "とくてんはこうだてこ → お題＆犯人を当てたら【コモン・マスター ともに+2】、インサイダーが逃げ切ったら【インサイダー+3】。時間内にお題が当たらなかったら【マスター0・コモン−1・インサイダー−2】！みんな損するから、インサイダーも“バレずに当てさせる”のがコツてこ。フォロワーはインサイダーと運命共同体てこ！",
-  "【マジカル🪄】は新作『マジカルインサイダー』風のモードてこ。マスターは“魔術師”になって、村人チーム（インサイダー＋村人）と対決！村人はお題は知らないけど、誰がインサイダーかは知ってるてこ。全員に“魔術カード”（ヒソヒソ声・ロボット…）が配られて、その縛りでしゃべるてこ。お題を当てたあと、魔術師が1人でインサイダーを指名。当たれば魔術師の勝ち、外れれば村人チームの勝ちてこ！",
-  "ロビーの“ゲームをえらぶ”から【ワードウルフ🐺】【ワードジャマー📝】にも移動できるてこ。ルールはそれぞれの画面で てこみんが説明するてこ。部屋主がロビーで“ゲーム設定”からモードやオプションを選べるてこ。それじゃ、いってらっしゃいてこ！",
-];
 
 const PointsPanel = ({ magic }) => (
   <div className="mp-panel">
@@ -108,6 +99,7 @@ export default function TekomiInsider() {
   const [isInsider, setIsInsider] = useState(false);
   const [isFollower, setIsFollower] = useState(false);
   const [soundOn, setSoundOn] = useState(isSound());
+  const [guideBack, setGuideBack] = useState("home"); // あそびかたを開く前の画面
   const [roomCode, setRoomCode] = useState("");
   const [room, setRoom] = useState(null);
   const [roleRevealed, setRoleRevealed] = useState(false);
@@ -116,7 +108,6 @@ export default function TekomiInsider() {
   const [loading, setLoading] = useState(false);
   const [timeLeft, setTimeLeft] = useState(300);
   const [lb, setLb] = useState(null);
-  const [tutStep, setTutStep] = useState(0);
 
   const [fName, setFName] = useState("");
   const [cat, setCat] = useState("おまかせ");
@@ -558,7 +549,7 @@ export default function TekomiInsider() {
         <button className="mp-btn mp-blue" onClick={tryHostUnlock}>🔑 主催者メニュー</button>
       )}
 
-      <button className="mp-btn mp-yellow" onClick={() => { setTutStep(0); setS("tutorial"); }}>📖 あそびかた</button>
+      <button className="mp-btn mp-yellow" onClick={() => { setGuideBack("home"); setS("tutorial"); }}>📖 あそびかた</button>
       <button className="mp-btn mp-blue" onClick={openLb}>★ つうさんせいせき</button>
       <button className="mp-btn mp-yellow" onClick={toggleSound}>{soundOn ? "🔊 こうかおん ON" : "🔇 こうかおん OFF"}</button>
 
@@ -570,31 +561,8 @@ export default function TekomiInsider() {
     </Shell>
   );
 
-  // ════ TUTORIAL ════
-  if (screen === "tutorial") return (
-    <Shell>
-      <Header sub="あそびかた" onBack={() => setS("home")} />
-      <div className="mp-h">★ てこみんのあそびかた講座 ★</div>
-      <div style={{ display: "flex", justifyContent: "center", margin: "10px 0 14px" }}><OwlDoc size={80} bob /></div>
-      <div className="mp-bubble" style={{ paddingLeft: 14, minHeight: 110, fontSize: 13 }}>
-        <span className="mp-bubble-name" style={{ left: 16 }}>てこみん</span>
-        <div style={{ paddingTop: 4 }}>{TUTORIAL[tutStep]}</div>
-      </div>
-      <div style={{ textAlign: "center", fontSize: 11, marginBottom: 10, letterSpacing: 2 }}>
-        {tutStep + 1} / {TUTORIAL.length}
-      </div>
-      {tutStep < TUTORIAL.length - 1 ? (
-        <button className="mp-btn mp-green" onClick={() => setTutStep((s) => s + 1)}>つぎへ ▶</button>
-      ) : (
-        <button className="mp-btn mp-green" onClick={() => setS("home")}>とじる ✓</button>
-      )}
-      <div className="mp-row" style={{ gap: 8 }}>
-        <button className="mp-btn mp-blue" style={{ flex: 1, marginBottom: 0 }} disabled={tutStep === 0}
-          onClick={() => setTutStep((s) => Math.max(0, s - 1))}>◀ もどる</button>
-        <button className="mp-btn mp-yellow" style={{ flex: 1, marginBottom: 0 }} onClick={() => setS("home")}>やめる</button>
-      </div>
-    </Shell>
-  );
+  // ════ TUTORIAL（ビジュアル説明書）════
+  if (screen === "tutorial") return <Guide onClose={() => setS(guideBack)} />;
 
   // ════ LEADERBOARD ════
   if (screen === "lb") {
@@ -752,6 +720,7 @@ export default function TekomiInsider() {
           <JammerSettings room={room} isHost={isHost} save={save} onStart={doStartSub} err={err} />
         )}
 
+        <button className="mp-btn mp-yellow" onClick={() => { setGuideBack("lobby"); setS("tutorial"); }}>📖 あそびかた（ルールを見る）</button>
         {isHost && <button className="mp-btn mp-blue" onClick={doResetRoom}>🔄 部屋をリセット</button>}
         <Bubble>
           {game !== "insider"
