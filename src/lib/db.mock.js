@@ -10,7 +10,20 @@ export function subscribeRoom(code, callback) {
   return () => { listeners[code] = (listeners[code] || []).filter((c) => c !== callback); };
 }
 export async function saveRoom(code, data) { store.rooms[code] = JSON.parse(JSON.stringify(data)); emit(code); }
-export async function setRoomField(code, key, value) { store.rooms[code] = { ...(store.rooms[code] || {}), [key]: value }; emit(code); }
+// key は "votes/abc" のようなパスも取れる（Firebase の set と同じ挙動に合わせる）
+export async function setRoomField(code, key, value) {
+  const path = String(key).split("/").filter(Boolean);
+  const root = { ...(store.rooms[code] || {}) };
+  let node = root;
+  for (let i = 0; i < path.length - 1; i++) {
+    const k = path[i];
+    node[k] = Array.isArray(node[k]) ? [...node[k]] : { ...(node[k] || {}) };
+    node = node[k];
+  }
+  node[path[path.length - 1]] = value;
+  store.rooms[code] = root;
+  emit(code);
+}
 export async function loadRoom(code) { return store.rooms[code] ? JSON.parse(JSON.stringify(store.rooms[code])) : null; }
 export async function loadLeaderboard() { return JSON.parse(JSON.stringify(store.leaderboard)); }
 export async function saveLeaderboard(data) { store.leaderboard = JSON.parse(JSON.stringify(data)); }

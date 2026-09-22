@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { setRoomField } from "../lib/db";
 import { pickWolfPair } from "../lib/words";
 import { applyLeaderboard, addScores } from "../lib/scoring";
-import { ROOM, enc, dec, fmt, computeFlair, topVote, shuffle, OwlDoc, Bubble, Shell, Header, ErrBox, ScoreRows, ModeCard } from "../ui";
+import { ROOM, enc, dec, fmt, computeFlair, topVote, shuffle, scorerOf, TAKEOVER_MS, OwlDoc, Bubble, Shell, Header, ErrBox, ScoreRows, ModeCard } from "../ui";
 
 const WOLF_COLOR = "#5b8def";
 const WOLF_TIMES = [{ s: 180, label: "3分" }, { s: 240, label: "4分" }, { s: 300, label: "5分" }];
@@ -129,10 +129,20 @@ export function WolfGame({ room, myId, myName, isHost, save, lb, onNextRound, on
   };
   const doVote = async (targetId) => {
     if (!room || room.votes?.[myId]) return;
-    const u = { ...room, votes: { ...(room.votes || {}), [myId]: targetId } };
-    if (Object.keys(u.votes).length >= players.length) await tally(u); else await save(u);
+    // 自分の票だけ書く（部屋ごと上書きすると、同時に押した人の票が消える）。開票は下の useEffect が担当。
+    await setRoomField(ROOM, `votes/${myId}`, targetId);
   };
   const forceTally = async () => { if (Object.keys(room.votes || {}).length === 0) return; await tally(room); };
+
+  // 票が揃ったら開票する。押した端末に任せると、その人の電波が切れたとき誰も開票しない。
+  // 採点役（部屋主）が担当し、寝ていれば他の端末が少し待って肩代わりする。
+  useEffect(() => {
+    if (phase !== "vote" || room?.scored) return;
+    if (Object.keys(room?.votes || {}).length < players.length) return;
+    const mine = scorerOf(room) === myId;
+    const id = setTimeout(() => { tally(room); }, mine ? 0 : TAKEOVER_MS);
+    return () => clearTimeout(id);
+  }, [phase, room, players.length, myId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitGuess = async () => {
     if (!guess.trim()) return;

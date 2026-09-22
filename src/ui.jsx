@@ -20,6 +20,11 @@ export function computeFlair(players, board) {
   return flair;
 }
 
+// 採点する端末を1台に決める（全端末が同じ答えを出す）。部屋主が居なければ先頭のプレイヤー。
+// 全員が同時に採点すると、通算成績の「読んで足して書き戻す」処理が重なって二重加算になる。
+export const scorerOf = (d) => ((d?.players || []).some((p) => p.id === d.hostId) ? d.hostId : (d?.players || [])[0]?.id);
+export const TAKEOVER_MS = 4000; // 採点役が寝ている時に他の端末が肩代わりするまでの待ち時間
+
 // 票の集計 → 最多得票（単独のとき）を返す。同数なら null
 export function topVote(votes) {
   const vc = {};

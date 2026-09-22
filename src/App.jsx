@@ -3,7 +3,7 @@ import { subscribeRoom, saveRoom, setRoomField, loadRoom, loadLeaderboard, saveL
 import { pickWord, dealMagicCards } from "./lib/words";
 import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
 import { applyLeaderboard, addScores } from "./lib/scoring";
-import { genId, ROOM, enc, dec, fmt, computeFlair, topVote, OwlDoc, Logo, Bubble, Shell, Redacted, Header, ErrBox, ScoreRows, ModeCard } from "./ui";
+import { genId, ROOM, enc, dec, fmt, computeFlair, topVote, scorerOf, TAKEOVER_MS, OwlDoc, Logo, Bubble, Shell, Redacted, Header, ErrBox, ScoreRows, ModeCard } from "./ui";
 import Guide from "./Guide";
 import { WolfSettings, WolfGame, startWolfRound, resetWolfRound } from "./games/WordWolf";
 import { JammerSettings, JammerGame, startJammerRound, resetJammerRound } from "./games/WordJammer";
@@ -105,6 +105,7 @@ export default function TekomiInsider() {
   const setS = (s) => { screenRef.current = s; setScreen(s); };
 
   const [myName, setMyName] = useState("");
+  const takeoverRef = useRef(null); // 採点の肩代わりタイマー
   const myNameRef = useRef("");
   myNameRef.current = myName;
   const [isMaster, setIsMaster] = useState(false);
@@ -185,6 +186,8 @@ export default function TekomiInsider() {
   // ── 採点（インサイダー）──
   const finalize = useCallback(async (code, data) => {
     if (data.scored) return data;
+    const fresh = await loadRoom(code).catch(() => null); // 直前に他の端末が採点していたら何もしない
+    if (fresh?.scored) return fresh;
     const isPeace = !!data.isPeaceVillage;
     const isMagic = !!data.magic;
     const insiderId = isPeace ? null : dec(data.insiderEnc || "");
@@ -292,9 +295,24 @@ export default function TekomiInsider() {
         const got = data.magic ? (data.votes?.[data.masterId] ? 1 : 0) : Object.keys(data.votes || {}).length;
         if (got >= need && need > 0 && !data.scored) {
           sfxDrumroll();
-          const updated = await finalize(roomCode, data);
-          setRoom(updated);
-          setS("result");
+          // 採点は1台だけが行う。その端末が寝ていたら、少し待って他の端末が肩代わりする。
+          if (scorerOf(data) === myId) {
+            const updated = await finalize(roomCode, data);
+            setRoom(updated);
+            setS("result");
+            return;
+          }
+          if (!takeoverRef.current) {
+            takeoverRef.current = setTimeout(async () => {
+              takeoverRef.current = null;
+              const latest = await loadRoom(roomCode).catch(() => null);
+              if (latest && !latest.scored) {
+                const u = await finalize(roomCode, latest);
+                setRoom(u); setS("result");
+              }
+            }, TAKEOVER_MS);
+          }
+          setRoom(data);
           return;
         }
       }
@@ -453,19 +471,20 @@ export default function TekomiInsider() {
     setRoom(u); setRoleRevealed(false); setS("sub");
   };
 
+  // 質問・回答・投票は「部屋まるごと上書き」ではなく必要な枝だけ更新する。
+  // 全体を書くと、他の人が同時に押した操作（票など）を自分の古いスナップショットで消してしまう。
   const doAsk = async () => {
     if (!qInput.trim() || !room) return;
     const qa = room.qa || [];
     if (qa.length > 0 && isUnanswered(qa[qa.length - 1])) return;
-    await save({ ...room, qa: [...qa, { id: genId(), q: qInput.trim(), ans: null, by: myName }] });
+    await setRoomField(ROOM, `qa/${qa.length}`, { id: genId(), q: qInput.trim(), ans: null, by: myName });
     setQInput("");
   };
 
   const doAnswer = async (ans) => {
-    const qa = [...(room?.qa || [])];
+    const qa = room?.qa || [];
     if (!qa.length || !isUnanswered(qa[qa.length - 1])) return;
-    qa[qa.length - 1] = { ...qa[qa.length - 1], ans };
-    await save({ ...room, qa });
+    await setRoomField(ROOM, `qa/${qa.length - 1}/ans`, ans);
   };
 
   const doWordGuessed = async () => {
@@ -481,7 +500,7 @@ export default function TekomiInsider() {
 
   const doVote = async (targetId) => {
     if (!room || room.votes?.[myId]) return;
-    await save({ ...room, votes: { ...room.votes, [myId]: targetId } });
+    await setRoomField(ROOM, `votes/${myId}`, targetId); // 自分の票だけ書く（他人の票を消さない）
   };
 
   // 電波不良などで全員の票が揃わないとき、主催者が今ある票で強制開票

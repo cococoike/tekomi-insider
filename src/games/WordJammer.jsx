@@ -1,9 +1,10 @@
 // ワードジャマー：出題者「ダスモン」が質問に本当の答えを書く。妨害者「ジャマー」がそれを見て嘘を2つ混ぜる。
 // 解答者「ワカルン」たちは3つの答えと会話・表情から本物を見抜く。役は毎ラウンド時計回りに交代。
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { setRoomField } from "../lib/db";
 import { pickJammerQuestion } from "../lib/words";
 import { applyLeaderboard, addScores } from "../lib/scoring";
-import { computeFlair, shuffle, OwlDoc, Bubble, Shell, Header, ErrBox, ScoreRows, ModeCard } from "../ui";
+import { ROOM, computeFlair, shuffle, scorerOf, TAKEOVER_MS, OwlDoc, Bubble, Shell, Header, ErrBox, ScoreRows, ModeCard } from "../ui";
 
 const JAM_COLOR = "#3cb371";
 // 答えの文字列は Firebase に平文で置かない（他人の端末から DevTools で覗けるため軽く難読化）
@@ -120,9 +121,18 @@ export function JammerGame({ room, myId, isHost, save, lb, onNextRound, onLeave,
 
   const doPick = async (idx) => {
     if (!amWakarun || jam.picks?.[myId] !== undefined) return;
-    const u = { ...room, jam: { ...jam, picks: { ...(jam.picks || {}), [myId]: idx } } };
-    if (Object.keys(u.jam.picks).length >= wakarun.length) await finalize(u); else await save(u);
+    // 自分の回答だけ書く（同時に選んだ人の回答を消さない）。採点は下の useEffect が担当。
+    await setRoomField(ROOM, `jam/picks/${myId}`, idx);
   };
+
+  // 全員が選んだら採点する。採点役（部屋主）が担当し、寝ていれば他の端末が肩代わりする。
+  useEffect(() => {
+    if (jam?.step !== "pick" || room?.scored) return;
+    if (Object.keys(jam?.picks || {}).length < wakarun.length) return;
+    const mine = scorerOf(room) === myId;
+    const id = setTimeout(() => { finalize(room); }, mine ? 0 : TAKEOVER_MS);
+    return () => clearTimeout(id);
+  }, [jam?.step, room, wakarun.length, myId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const flair = computeFlair(players, lb);
   const roleBar = (label) => (
