@@ -163,7 +163,7 @@ export default function Guide({ onClose, onTab }) {
               { t: "質問タイム（5・7・9分）", d: "「それは食べ物？」のように YES / NO で答えられる質問をする。答えるのはマスターだけ。足りなければ +1分 延長できる。" },
               { t: "お題が当たったら「お題的中」", d: "当てた瞬間にマスターがボタンを押す。ここで時間はストップ。" },
               { t: "全員でインサイダーを一斉投票", d: "マスターも投票する。全員そろうと自動で開票。" },
-              { t: "結果とくとく点 → 次のラウンドへ", d: "マスターが交代してロビーに戻る。" },
+              { t: "結果ととくてん → 次のラウンドへ", d: "マスターが交代してロビーに戻る。" },
             ]} />
           </Panel>
 
@@ -280,7 +280,7 @@ export default function Guide({ onClose, onTab }) {
               <span style={{ fontSize: 26, filter: "drop-shadow(1px 1px 0 #000)" }}>😇</span>
               <div style={{ flex: 1 }}>
                 <div className="gd-name">平和村</div>
-                <div className="gd-desc">10%の確率でインサイダーが<b>いない</b>回になる。全員が「インサイダーなし」に投票できたら全員 +1。疑心暗鬼が跳ね上がる。</div>
+                <div className="gd-desc">10%の確率でインサイダーが<b>いない</b>回になる。全員が「インサイダーなし」に投票できたら全員 +1。見抜けなかったときや時間切れは<b>全員0点</b>（マイナスにはならない）。疑心暗鬼が跳ね上がる。</div>
               </div>
             </div>
             <div className="gd-card">
