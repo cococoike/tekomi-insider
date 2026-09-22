@@ -46,6 +46,10 @@ const MASTER_RULES = {
 
 const TIMES = [{ s: 300, label: "5分" }, { s: 420, label: "7分" }, { s: 540, label: "9分" }];
 
+// 未回答の質問かどうか。Firebase は null のキーを保存しないので、
+// 読み戻すと ans は undefined になる（=== null では判定できない）。
+const isUnanswered = (item) => item?.ans === null || item?.ans === undefined;
+
 // 残り時間は startTime を正として各端末が自分で計算する。
 // （マスターの端末がスリープしても全員の時計が止まらない。延長は duration を伸ばす）
 const calcLeft = (d) => {
@@ -441,14 +445,14 @@ export default function TekomiInsider() {
   const doAsk = async () => {
     if (!qInput.trim() || !room) return;
     const qa = room.qa || [];
-    if (qa.length > 0 && qa[qa.length - 1].ans === null) return;
+    if (qa.length > 0 && isUnanswered(qa[qa.length - 1])) return;
     await save({ ...room, qa: [...qa, { id: genId(), q: qInput.trim(), ans: null, by: myName }] });
     setQInput("");
   };
 
   const doAnswer = async (ans) => {
     const qa = [...(room?.qa || [])];
-    if (!qa.length || qa[qa.length - 1].ans !== null) return;
+    if (!qa.length || !isUnanswered(qa[qa.length - 1])) return;
     qa[qa.length - 1] = { ...qa[qa.length - 1], ans };
     await save({ ...room, qa });
   };
@@ -807,7 +811,7 @@ export default function TekomiInsider() {
   // ════ GAME ════
   if (screen === "game") {
     const qa = room?.qa || [];
-    const pending = qa.length > 0 && qa[qa.length - 1].ans === null;
+    const pending = qa.length > 0 && isUnanswered(qa[qa.length - 1]);
     const word = dec(room?.wordEnc || "");
     const roleLabel = { master: "マスター", wizard: "魔術師", insider: "インサイダー", common: "コモン", villager: "村人", follower: "フォロワー" }[role];
     const roleColor = { master: "#D4AF37", wizard: "#5b8def", insider: "#E53935", common: "#D4AF37", villager: "#5b8def", follower: "#a020e0" }[role];
@@ -845,7 +849,7 @@ export default function TekomiInsider() {
             <div key={item.id || i} style={{ padding: "9px 0", borderBottom: "2px dashed #ddd" }}>
               <div style={{ fontSize: 10, color: "#888", marginBottom: 2 }}>{item.by}</div>
               <div style={{ fontSize: 14, color: "#111", marginBottom: 6 }}>{item.q}</div>
-              {item.ans === null ? (
+              {isUnanswered(item) ? (
                 isMaster ? (
                   <div style={{ display: "flex", gap: 6 }}>
                     {[["YES", "mp-green"], ["NO", "mp-red"], ["？", "mp-blue"]].map(([a, cls]) => (
