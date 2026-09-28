@@ -1,16 +1,27 @@
-# React + Vite
+# てこみンサイダーゲーム
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+飲み会で、みんなのスマホで遊ぶパーティーゲーム集。**インサイダー（＋マジカル）／ワードウルフ／ワードジャマー**。
 
-Currently, two official plugins are available:
+- 本番：https://tekomi-insider.vercel.app （GitHub の main に push すると1〜2分で自動更新）
+- 遊び方はアプリの中の「あそびかた」にぜんぶ書いてある
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## 手元で試す（本番の Firebase・通算成績には一切さわらない）
 
-## React Compiler
+**[手元で遊んでみる.bat](手元で遊んでみる.bat) をダブルクリック**（Node.js が必要）。
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- ブラウザが開いたら、タブを何枚か開く → **タブ1枚 = スマホ1台**として一緒に遊べる
+- 全画面の見本：http://localhost:5199/?gallery
+- 止めるときは黒い窓を閉じる
 
-## Expanding the ESLint configuration
+## 直したあとの確認（AI がやる。コマンドは HANDOFF.md）
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+| 確認 | 中身 |
+|---|---|
+| `npm test` | ルール・採点・入室・お題リストのテスト |
+| `npm run e2e` | 4人ぶんを自動で1周（3ゲーム・同時入室・リロード・二重採点など20項目） |
+| `npm run shots` | 全画面を撮って `shots/index.html` に並べる（目で見て確かめる用） |
+
+## 決まりごと
+
+- 見た目の決まり → [DESIGN.md](DESIGN.md)
+- 仕組み・落とし穴・引き継ぎ → [HANDOFF.md](HANDOFF.md)
