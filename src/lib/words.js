@@ -1,4 +1,6 @@
-const WORD_LIST = {
+import { shuffle } from "./util.js";
+
+export const WORD_LIST = {
   食べもの: [
     "カレーライス", "ラーメン", "寿司", "天ぷら", "焼肉", "餃子", "うどん", "そば", "たこ焼き", "お好み焼き",
     "ハンバーガー", "ピザ", "パスタ", "チャーハン", "おにぎり", "サンドイッチ", "ホットドッグ", "フライドチキン",
@@ -51,7 +53,7 @@ const WORD_LIST = {
 
 // アダルトモード専用（下ネタ・きわどい単語）。完全身内クローズド前提・成人同士。
 // 通常の「おまかせ」には絶対に混ざらない。お題は質問で当てられる名詞縛り。
-const ADULT_LIST = [
+export const ADULT_LIST = [
   // 行為・シチュ
   "ディープキス", "キスマーク", "前戯", "愛撫", "中出し", "寸止め", "潮吹き", "絶頂", "騎乗位", "正常位",
   "バック", "手コキ", "パイズリ", "フェラ", "夜の営み", "一夜限り", "お持ち帰り", "連れ込み", "夜這い", "据え膳",
@@ -201,7 +203,7 @@ export function pickJammerQuestion(used = [], adult = false) {
 
 // 魔術カードを人数分、重複なしで配る（人数が多ければ繰り返し可）
 export function dealMagicCards(n) {
-  const shuffled = [...MAGIC_CARDS].sort(() => Math.random() - 0.5);
+  const shuffled = shuffle(MAGIC_CARDS);
   const out = [];
   for (let i = 0; i < n; i++) out.push(shuffled[i % shuffled.length]);
   return out;

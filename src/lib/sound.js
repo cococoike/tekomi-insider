@@ -55,3 +55,31 @@ export function sfxResult(win) {
   if (win) [659, 784, 988, 1319].forEach((f, i) => tone(f, i * 0.1, 0.2, "square", 0.13));
   else [392, 330, 262].forEach((f, i) => tone(f, i * 0.14, 0.22, "sawtooth", 0.11));
 }
+
+// 役職を開いたとき（ファンファーレ）
+export function sfxReveal() {
+  if (!enabled) return;
+  [392, 523, 659, 784].forEach((f, i) => tone(f, i * 0.07, 0.12, "square", 0.1));
+  tone(1047, 0.3, 0.3, "triangle", 0.13);
+}
+
+// 残り10秒のカウント（最後の1秒は高い音）。時計役の端末だけが鳴らす
+export function sfxTick(last = false) {
+  if (!enabled) return;
+  tone(last ? 1320 : 880, 0, 0.06, "square", 0.08);
+}
+
+// 時間切れのブザー
+export function sfxBuzzer() {
+  if (!enabled) return;
+  tone(220, 0, 0.45, "sawtooth", 0.13);
+  tone(233, 0, 0.45, "square", 0.06);
+  tone(196, 0.45, 0.6, "sawtooth", 0.13);
+}
+
+// 投票した・選んだ
+export function sfxVote() {
+  if (!enabled) return;
+  tone(660, 0, 0.06, "square", 0.1);
+  tone(990, 0.06, 0.1, "square", 0.1);
+}

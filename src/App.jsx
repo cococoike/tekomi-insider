@@ -1,534 +1,274 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { subscribeRoom, saveRoom, setRoomField, loadRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
+import { useState, useEffect, useRef, useContext } from "react";
+import { subscribeRoom, saveRoom, setRoomField, updateRoom, loadRoom, transactRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
 import { pickWord, dealMagicCards } from "./lib/words";
-import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, setSound, isSound } from "./lib/sound";
-import { applyLeaderboard, addScores } from "./lib/scoring";
-import { genId, ROOM, enc, dec, fmt, computeFlair, topVote, scorerOf, TAKEOVER_MS, OwlDoc, Logo, Bubble, Shell, Redacted, Header, ErrBox, ScoreRows, ModeCard } from "./ui";
+import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, sfxReveal, sfxVote } from "./lib/sound";
+import { finalizeRound } from "./lib/scoring";
+import { genId, ROOM, NONE_ID, enc, dec, computeFlair, scorerOf, TAKEOVER_MS, topVote, sanitizeName } from "./lib/util";
+import {
+  freshRoom, applyJoin, applyLeave, screenFor, isUnanswered, calcLeft, roleOf, votesComplete, scoreInsider, startInsider, toLobby,
+} from "./lib/rules";
+import { ROLES, GAMES } from "./lib/roles";
+import { device } from "./lib/device";
+import { useWakeLock, useNow, useSound, buzz } from "./lib/hooks";
+import { ShotCtx } from "./lib/shotctx";
+import { Icon } from "./icons";
+import { OwlDoc, RoleChar, Logo, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, Tile, OptRow, Seg, Secret, TimerBar, HostMenu, Fold } from "./ui";
 import Guide from "./Guide";
-import { WolfSettings, WolfGame, startWolfRound, resetWolfRound } from "./games/WordWolf";
-import { JammerSettings, JammerGame, startJammerRound, resetJammerRound } from "./games/WordJammer";
+import { WolfSettings, WolfGame } from "./games/WordWolf";
+import { JammerSettings, JammerGame } from "./games/WordJammer";
+import { startWolfRound, startJammerRound } from "./lib/rounds";
 
-const NONE_ID = "__none__";
 const GATE = "__gate__"; // 開閉フラグの保存先（rooms/ 配下なので既存ルールでOK）
 const HOST_KEY = "tekomi"; // 主催者キー（開閉できる人だけが知る合言葉。変更可）
 const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "むずかしめ"];
+const OVERLAYS = new Set(["tutorial", "lb"]); // 見ている間もゲームは進む画面
 
-// ── 遊べるゲーム。ロビーで部屋主が切り替える（同じ部屋・同じメンバーのまま移動できる）──
-export const GAMES = {
-  insider:  { label: "インサイダー", emoji: "🕵️", color: "#D4AF37", min: 3, desc: "質問でお題を当て、知ってるフリの潜入者を暴く" },
-  wordwolf: { label: "ワードウルフ", emoji: "🐺", color: "#5b8def", min: 3, desc: "みんなでお題を語り合い、1人だけ違うお題の“ウルフ”を探す" },
-  jammer:   { label: "ワードジャマー", emoji: "📝", color: "#3cb371", min: 3, desc: "本当の答えに嘘を2つ混ぜて、見抜けるか騙し合う" },
-};
-
-// 各オプションは独立ON/OFF。マジカルは役職構造が変わるので、平和村・フォロワーとは同時に使わない。
+// インサイダーのオプション（独立 ON/OFF。マジカルは役職の形が変わるので平和村・フォロワーとは同時に使わない）
 const OPTS = [
-  { key: "magic",    label: "マジカル🪄", emoji: "🧙", desc: "マスター＝魔術師。村人は正解を知らないが誰がインサイダーか知っている。しゃべり方の縛り“魔術カード”つき", color: "#5b8def" },
-  { key: "peace",    label: "平和村",      emoji: "😇", desc: "10%でインサイダー不在。疑心暗鬼MAX", color: "#8a8a8a" },
-  { key: "adult",    label: "アダルト🔞", emoji: "🌶️", desc: "お題がきわどく…完全身内専用", color: "#a020e0" },
-  { key: "follower", label: "フォロワー",  emoji: "🥷", desc: "6人以上で発動。インサイダーの隠れ味方が1人", color: "#7a2fa0" },
+  { key: "magic",    label: "マジカル",   icon: "wand",  color: "#3f6fd6", desc: "魔術師 vs 村人チーム。しゃべり方の縛りつき" },
+  { key: "peace",    label: "平和村",     icon: "halo",  color: "#8a8a8a", desc: "10%でインサイダーがいない回" },
+  { key: "adult",    label: "アダルト",   icon: "chili", color: "#a020e0", desc: "お題がきわどく…身内だけの席で" },
+  { key: "follower", label: "フォロワー", icon: "ninja", color: "#7a2fa0", desc: "6人以上で、インサイダーに隠れ味方" },
 ];
-// 有効なオプションの要約ラベル
 const optsSummary = (r) => {
-  if (!r) return "ふつう";
   const on = [];
-  if (r.magic) on.push("マジカル");
-  if (r.peace && !r.magic) on.push("平和村");
-  if (r.adult) on.push("アダルト");
-  if (r.follower && !r.magic) on.push("フォロワー");
+  if (r?.magic) on.push("マジカル");
+  if (r?.peace && !r?.magic) on.push("平和村");
+  if (r?.adult) on.push("アダルト");
+  if (r?.follower && !r?.magic) on.push("フォロワー");
   return on.length ? on.join("＋") : "ふつう";
 };
 
-const MASTER_RULES = {
-  random: { label: "ランダム", emoji: "🎲", desc: "毎ラウンド、ランダムに抽選" },
-  robin:  { label: "じゅんぐり", emoji: "🔁", desc: "参加順に1人ずつローテーション" },
-  fixed:  { label: "固定", emoji: "📌", desc: "部屋主がずっとマスター" },
+const MASTER_RULES = [
+  { k: "random", label: "ランダム", icon: "dice" },
+  { k: "robin", label: "じゅんぐり", icon: "loop" },
+  { k: "fixed", label: "固定", icon: "pin" },
+];
+const TIMES = [{ k: 300, label: "5分" }, { k: 420, label: "7分" }, { k: 540, label: "9分" }];
+// 暗い地の上で読める役職の色
+const GLOW = { master: "#D4AF37", insider: "#ff6b5e", common: "#8fb3ff", follower: "#c58cf0", wizard: "#8fb3ff", villager: "#8fb3ff" };
+
+const POINTS = {
+  normal: [
+    ["コモンの勝ち（お題も犯人も当てた）", ["コモン +2", "マスター +2"]],
+    ["インサイダーの逃げ切り（犯人を外した・同票）", ["インサイダー +3", "フォロワー +2"]],
+    ["時間切れ（お題が当たらない）", ["コモン −1", "インサイダー −2", "マスター 0"]],
+  ],
+  magic: [
+    ["村人チームの勝ち（指名を外させた）", ["村人 +2", "インサイダー +2"]],
+    ["魔術師の勝ち（インサイダーを見破った）", ["魔術師 +3"]],
+    ["時間切れ（お題が当たらない）", ["魔術師 +2", "村人 −1"]],
+  ],
 };
-
-const TIMES = [{ s: 300, label: "5分" }, { s: 420, label: "7分" }, { s: 540, label: "9分" }];
-
-// 未回答の質問かどうか。Firebase は null のキーを保存しないので、
-// 読み戻すと ans は undefined になる（=== null では判定できない）。
-const isUnanswered = (item) => item?.ans === null || item?.ans === undefined;
-
-// 残り時間は startTime を正として各端末が自分で計算する。
-// （マスターの端末がスリープしても全員の時計が止まらない。延長は duration を伸ばす）
-const calcLeft = (d) => {
-  if (!d?.startTime) return d?.duration || 300;
-  return Math.max(0, (d.duration || 300) - Math.floor((Date.now() - d.startTime) / 1000));
-};
-
-// 次のマスターを決める
-function nextMaster(players, curId, rule, hostId) {
-  if (!players || players.length === 0) return hostId;
-  if (rule === "fixed") return hostId;
-  const idx = players.findIndex((p) => p.id === curId);
-  if (rule === "robin") return players[(idx + 1) % players.length].id;
-  // random（直前のマスターはなるべく避ける）
-  const pool = players.length > 1 ? players.filter((p) => p.id !== curId) : players;
-  return pool[Math.floor(Math.random() * pool.length)].id;
-}
-
-
 const PointsPanel = ({ magic }) => (
-  <div className="mp-panel">
-    <div className="mp-panel-head">★ とくてん ★</div>
-    <div style={{ fontSize: 11, lineHeight: 1.85, color: "#1a1a1a" }}>
-      {magic ? (
-        <>
-          <div><b style={{ color: "#5b8def" }}>村人チーム勝利</b>（お題を当て、魔術師が指名を外した）：村人・インサイダー <b>+2</b></div>
-          <div><b style={{ color: "#E53935" }}>魔術師の勝利</b>（インサイダーを見破った）：魔術師 <b>+3</b></div>
-          <div><b style={{ color: "#E53935" }}>時間切れ</b>（お題を当てられず）：魔術師 <b>+2</b>／村人チーム <b>−1</b></div>
-          <div style={{ color: "#6a6a6a" }}>魔術カードの縛りを破ったら…みんなでツッコむてこ（罰は口頭で）</div>
-        </>
-      ) : (
-        <>
-          <div><b style={{ color: "#b8901f" }}>コモン勝利</b>（お題＆犯人を当てた）：コモン・マスター ともに <b>+2</b></div>
-          <div><b style={{ color: "#E53935" }}>インサイダー逃げ切り</b>（お題は判明したが犯人を当てられなかった）：インサイダー <b>+3</b></div>
-          <div><b style={{ color: "#E53935" }}>時間切れ</b>（お題を当てられず）：マスター0／コモン <b>−1</b>／インサイダー <b>−2</b></div>
-          <div style={{ color: "#7a2fa0" }}>フォロワーはインサイダーと運命共同体（逃げ切り <b>+2</b> ／ 時間切れ <b>−2</b>）</div>
-          <div style={{ color: "#6a6a6a" }}>平和村：全員が「インサイダーなし」に投票できたら全員 <b>+1</b></div>
-        </>
-      )}
-    </div>
-  </div>
+  <Fold head="とくてん（押すと開く）" icon="star">
+    {POINTS[magic ? "magic" : "normal"].map(([t, chips]) => (
+      <div key={t} className="pt-row">
+        <div style={{ fontSize: 14, lineHeight: 1.5 }}>{t}</div>
+        <div className="chips-line">{chips.map((c) => <span key={c} className={`chip ${c.includes("−") ? "chip-minus" : c.endsWith(" 0") ? "chip-zero" : "chip-plus"}`}>{c}</span>)}</div>
+      </div>
+    ))}
+  </Fold>
 );
 
-export default function TekomiInsider() {
-  // 端末ごとの安定ID（localStorage永続）。同名入室時は既存プレイヤーIDを引き継ぐ。
+export default function TekomiInsider({ shot = null }) {
+  const shotCtx = useContext(ShotCtx);
+  // 端末ごとの安定ID。同名で入ると既存プレイヤーのIDを引き継ぐ
   const [myId, setMyId] = useState(() => {
-    let v = localStorage.getItem("tekomi_uid");
-    if (!v) { v = genId(); localStorage.setItem("tekomi_uid", v); }
+    let v = device.get("tekomi_uid");
+    if (!v) { v = genId(); device.set("tekomi_uid", v); }
     return v;
   });
+  const myIdRef = useRef(myId);
   const [screen, setScreen] = useState("home");
   const screenRef = useRef("home");
   const setS = (s) => { screenRef.current = s; setScreen(s); };
 
   const [myName, setMyName] = useState("");
-  const takeoverRef = useRef(null); // 採点の肩代わりタイマー
-  const myNameRef = useRef("");
-  myNameRef.current = myName;
-  const [isMaster, setIsMaster] = useState(false);
-  const [isHost, setIsHost] = useState(false);
-  const [isInsider, setIsInsider] = useState(false);
-  const [isFollower, setIsFollower] = useState(false);
-  const [soundOn, setSoundOn] = useState(isSound());
-  const [guideBack, setGuideBack] = useState("home"); // あそびかたを開く前の画面
+  const [fName, setFName] = useState(() => device.get("tekomi_name") || "");
+  const [resume, setResume] = useState(null); // この端末が部屋にいれば、その名前（つづきから）
   const [roomCode, setRoomCode] = useState("");
   const [room, setRoom] = useState(null);
-  const [roleRevealed, setRoleRevealed] = useState(false);
+  const roomRef = useRef(null);
+  const [roleRevealed, setRoleRevealed] = useState(!!shotCtx.revealed);
+  const [overlayBack, setOverlayBack] = useState("home");
+  const [pick, setPick] = useState(null); // 投票でえらんだ人（決定前）
   const [qInput, setQInput] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
-  const [timeLeft, setTimeLeft] = useState(300);
   const [lb, setLb] = useState(null);
-
-  const [fName, setFName] = useState("");
   const [cat, setCat] = useState("おまかせ");
   const [gateOpen, setGateOpen] = useState(null); // null=読込中
-  const [hostUnlocked, setHostUnlocked] = useState(false);
+  const [hostUnlocked, setHostUnlocked] = useState(() => device.get("tekomi_host") === "1");
+  const [soundOn, toggleSound] = useSound();
+  const [kickMode, setKickMode] = useState(false); // 部屋主：帰った人を外すモード
 
   const game = room?.game || "insider";
+  const players = room?.players || [];
+  const isHost = room?.hostId === myId;
+  const isMaster = room?.masterId === myId;
+  const magic = !!room?.magic;
 
-  // 開閉フラグを購読＋主催者ロック状態を復元
-  useEffect(() => {
-    if (localStorage.getItem("tekomi_host") === "1") setHostUnlocked(true);
-    const unsub = subscribeRoom(GATE, (d) => setGateOpen(!!(d && d.open)));
-    return () => unsub();
-  }, []);
+  // 撮影・確認用に、いまの画面名を body に出しておく（scripts/shots.mjs が待ち合わせに使う）
+  useEffect(() => { document.body.dataset.screen = screen; }, [screen]);
 
-  // すべての<button>クリックでクリック音（鳴らない取りこぼしを防ぐ）
+  // ゲーム中は画面を消さない
+  useWakeLock(!!roomCode);
+
+  // 開閉フラグを購読
+  useEffect(() => subscribeRoom(GATE, (d) => setGateOpen(!!(d && d.open))), []);
+
+  // すべての<button>クリックでクリック音
   useEffect(() => {
     const h = (e) => { if (e.target.closest && e.target.closest("button")) sfxClick(); };
     document.addEventListener("click", h);
     return () => document.removeEventListener("click", h);
   }, []);
 
+  // この端末がすでに部屋にいるか（リロード・電池切れからの復帰）。ゲーム中なら自動で戻る
+  useEffect(() => {
+    let alive = true;
+    loadRoom(ROOM).then((d) => {
+      const me = d?.players?.find((p) => p.id === myIdRef.current);
+      if (!alive) return;
+      if (!me) { if (shot && OVERLAYS.has(shot.screen)) openOverlay(shot.screen); return; }
+      setResume(me.name);
+      if ((d.phase && d.phase !== "lobby") || (shot && !shot.stay)) doEnter(me.name);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 部屋の購読。画面は「部屋の進行」から1つに決める（screenFor）
+  useEffect(() => {
+    if (!roomCode) return undefined;
+    const unsub = subscribeRoom(roomCode, (data) => {
+      const cur = screenRef.current;
+      if (cur === "home") return;
+      if (!data || !Array.isArray(data.players) || !data.players.some((p) => p.id === myIdRef.current)) {
+        // 部屋がリセットされた／部屋主に外された
+        setRoomCode(""); roomRef.current = null; setRoom(null); setRoleRevealed(false); setResume(null);
+        setErr("部屋から外れたてこ。もう一度「はじめる」で入れるてこ");
+        screenRef.current = "home"; setScreen("home");
+        return;
+      }
+      roomRef.current = data;
+      setRoom(data);
+      if (OVERLAYS.has(cur)) return; // あそびかた・成績を見ている間は画面を変えない（閉じたときに追いつく）
+      const next = screenFor(data, cur);
+      if (next !== cur) {
+        if (next === "reveal" || next === "lobby") setRoleRevealed(false);
+        if (next === "vote") setPick(null);
+        screenRef.current = next; setScreen(next);
+      }
+    });
+    return () => unsub();
+  }, [roomCode]);
+
+  // 投票がそろったら開票（採点役＝部屋主がすぐ、寝ていたら他の端末が少し待って肩代わり。二重採点はトランザクションで防ぐ）
+  useEffect(() => {
+    if (!room || game !== "insider" || room.phase !== "vote" || room.scored || !votesComplete(room)) return undefined;
+    const id = setTimeout(() => {
+      finalizeRound((cur) => (cur.phase === "vote" && votesComplete(cur) ? scoreInsider(cur) : null)).catch(() => {});
+    }, scorerOf(room) === myId ? 0 : TAKEOVER_MS);
+    return () => clearTimeout(id);
+  }, [room, game, myId]);
+
+  // 開票のドラムロール・結果のジングル（ラウンドごとに1回）
+  const played = useRef({});
+  useEffect(() => {
+    if (!room) return;
+    const k = `${room.round}-${room.game}`;
+    if (room.phase === "vote" && game === "insider" && votesComplete(room) && played.current.drum !== k) { played.current.drum = k; sfxDrumroll(); }
+    if (room.phase === "result" && played.current.result !== k) {
+      played.current.result = k;
+      const winners = Object.entries(room.lastDelta || {}).filter(([, v]) => v > 0).map(([n]) => n);
+      sfxResult(winners.includes(myName));
+    }
+  }, [room, game, myName]);
+
+  // 通算成績（順位の印）
+  useEffect(() => {
+    if (screen === "lobby" || room?.phase === "result") loadLeaderboard().then(setLb).catch(() => {});
+  }, [screen, room?.phase, room?.round]);
+
+  // インサイダーの残り時間は、開始時刻から各端末が自分で計算する
+  const now = useNow(screen === "game");
+  const left = calcLeft(room, now);
+
+  // ── 入退室 ──────────────────────────────────────
+  async function doEnter(resumeName) {
+    const name = sanitizeName(resumeName ?? fName);
+    if (!name) return setErr("なまえをいれてね");
+    if (!resumeName && !gateOpen && !hostUnlocked) return setErr("いまは開いてないよ。主催者がオープンにするまで待ってね");
+    setLoading(true); setErr("");
+    try {
+      let out = null;
+      const res = await transactRoom(ROOM, (cur) => { out = applyJoin(cur, { name, uid: myIdRef.current, asHost: hostUnlocked }); return out.next; });
+      if (!out || out.error) { setErr("いまゲーム中…このラウンドが終わってロビーに戻ったら入れるてこ"); return; }
+      if (out.uid !== myIdRef.current) { myIdRef.current = out.uid; setMyId(out.uid); device.set("tekomi_uid", out.uid); }
+      device.set("tekomi_name", out.name);
+      setMyName(out.name); setFName(out.name); setResume(out.name);
+      const data = res.value;
+      roomRef.current = data; setRoom(data);
+      setRoleRevealed(!!shotCtx.revealed);
+      let next = screenFor(data, shot?.screen || "home");
+      if (shot && OVERLAYS.has(shot.screen)) { setOverlayBack(next); next = shot.screen; if (next === "lb") loadLeaderboard().then(setLb); }
+      screenRef.current = next; setScreen(next);
+      setRoomCode(ROOM);
+    } catch (e) {
+      console.error(e);
+      setErr("つながらなかったてこ…電波を確かめて、もう一度押してね");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // 自分の画面だけホームへ（部屋には残る。同じ名前で入り直せば戻れる）
+  const toHome = () => {
+    const nm = myName;
+    setRoomCode(""); roomRef.current = null; setRoom(null); setRoleRevealed(false); setQInput(""); setPick(null); setErr("");
+    setS("home");
+    loadRoom(ROOM).then((d) => { setResume(d?.players?.some((p) => p.id === myIdRef.current) ? nm : null); }).catch(() => {});
+  };
+  const goHome = () => {
+    if (window.confirm("ホームにもどる？\nゲームは続いているので、「つづきから」でいつでも戻れるてこ")) toHome();
+  };
+  // ロビーから部屋を抜ける（名前が一覧から消える。同じ名前で入り直せば点数はそのまま）
+  const doLeave = async () => {
+    if (!window.confirm("部屋から抜けてホームにもどる？\n同じ名前で入り直せば、点数はそのままてこ")) return;
+    try { await transactRoom(ROOM, (cur) => applyLeave(cur, myIdRef.current)); } catch { /* 電波不良でもホームへは戻る */ }
+    toHome();
+  };
+  const doKick = async (p) => {
+    if (!window.confirm(`「${p.name}」を部屋から外す？\n（帰った人・電波が切れた人をはずす用。同じ名前で入り直せば戻れる）`)) return;
+    await transactRoom(ROOM, (cur) => applyLeave(cur, p.id));
+  };
+
+  const doResetRoom = async () => {
+    if (!window.confirm("部屋をリセットする？\n入っている人は全員ホームに戻され、部屋の点数も消えるてこ（通算成績は残る）")) return;
+    const name = sanitizeName(myName || fName) || "主催者";
+    const data = freshRoom(name, myIdRef.current);
+    await saveRoom(ROOM, data);
+    device.set("tekomi_name", name);
+    setMyName(name); setFName(name); setResume(name);
+    roomRef.current = data; setRoom(data); setRoleRevealed(false); setErr("");
+    setS("lobby"); setRoomCode(ROOM);
+  };
+
   const setGate = async (open) => { await saveRoom(GATE, { open }); setGateOpen(open); };
   const tryHostUnlock = () => {
     const k = window.prompt("主催者キーを入力してね");
     if (k === null) return;
-    if (k === HOST_KEY) { setHostUnlocked(true); localStorage.setItem("tekomi_host", "1"); }
+    if (k === HOST_KEY) { setHostUnlocked(true); device.set("tekomi_host", "1"); }
     else window.alert("キーがちがうよ");
   };
 
-  // 効果音 ON/OFF（localStorage 永続）
-  useEffect(() => {
-    const saved = localStorage.getItem("tekomi_sound");
-    if (saved !== null) { const on = saved === "1"; setSound(on); setSoundOn(on); }
-  }, []);
-  const toggleSound = () => {
-    const next = !soundOn;
-    setSound(next); setSoundOn(next);
-    localStorage.setItem("tekomi_sound", next ? "1" : "0");
-    if (next) sfxCorrect();
+  const openOverlay = async (s) => {
+    setOverlayBack(screenRef.current);
+    if (s === "lb") setLb(await loadLeaderboard().catch(() => ({})));
+    setS(s);
   };
-
-  // 累計成績（順位フレア用）をロビー／結果でロード
-  useEffect(() => {
-    if (screen === "lobby" || screen === "result" || (screen === "sub" && room?.phase === "result")) {
-      loadLeaderboard().then(setLb).catch(() => {});
-    }
-  }, [screen, room?.scored, room?.round, room?.phase]);
-
-  // 結果ジングル（ラウンドごと1回）
-  const resultPlayed = useRef(null);
-  useEffect(() => {
-    if (screen === "result" && room?.outcome) {
-      const key = `${room.round}-${room.outcome}`;
-      if (resultPlayed.current !== key) {
-        resultPlayed.current = key;
-        sfxResult(["commons", "peace_win", "magic_village"].includes(room.outcome));
-      }
-    }
-  }, [screen, room?.outcome, room?.round]);
-
-  // ── 採点（インサイダー）──
-  const finalize = useCallback(async (code, data) => {
-    if (data.scored) return data;
-    const fresh = await loadRoom(code).catch(() => null); // 直前に他の端末が採点していたら何もしない
-    if (fresh?.scored) return fresh;
-    const isPeace = !!data.isPeaceVillage;
-    const isMagic = !!data.magic;
-    const insiderId = isPeace ? null : dec(data.insiderEnc || "");
-    const followerId = dec(data.followerEnc || "");
-    const delta = {};
-    const add = (name, pts) => { delta[name] = (delta[name] || 0) + pts; };
-    let outcome;
-    let winners = [];
-
-    if (isMagic) {
-      // マジカル：マスター＝魔術師 vs 村人チーム（インサイダー＋村人）
-      const wizard = data.players.find((p) => p.id === data.masterId);
-      const team = data.players.filter((p) => p.id !== data.masterId);
-      if (!data.wordGuessed) {
-        if (wizard) { add(wizard.name, 2); winners.push(wizard.name); }
-        team.forEach((p) => add(p.name, -1));
-        outcome = "magic_timeout";
-      } else {
-        const guess = (data.votes || {})[data.masterId];
-        if (guess && guess === insiderId) {
-          if (wizard) { add(wizard.name, 3); winners.push(wizard.name); }
-          outcome = "magic_wizard";
-        } else {
-          team.forEach((p) => { add(p.name, 2); winners.push(p.name); });
-          outcome = "magic_village";
-        }
-      }
-    } else if (isPeace) {
-      // 平和村ルート
-      if (!data.wordGuessed) {
-        outcome = "peace_timeout";
-      } else {
-        const { top } = topVote(data.votes);
-        if (top === NONE_ID) {
-          data.players.forEach((p) => { add(p.name, 1); winners.push(p.name); });
-          outcome = "peace_win";
-        } else {
-          outcome = "peace_lose";
-        }
-      }
-    } else {
-      // 通常ルート（ふつう／アダルト）。フォロワーはインサイダーと運命共同体。
-      const fol = followerId ? data.players.find((p) => p.id === followerId) : null;
-      if (!data.wordGuessed) {
-        data.players.forEach((p) => {
-          if (p.id === data.masterId) return;
-          if (p.id === insiderId || p.id === followerId) add(p.name, -2);
-          else add(p.name, -1);
-        });
-        outcome = "timeout";
-      } else {
-        const { top } = topVote(data.votes);
-        if (top === insiderId) {
-          data.players.forEach((p) => {
-            if (p.id === data.masterId) { add(p.name, 2); winners.push(p.name); }
-            else if (p.id !== insiderId && p.id !== followerId) { add(p.name, 2); winners.push(p.name); }
-          });
-          outcome = "commons";
-        } else {
-          const ins = data.players.find((p) => p.id === insiderId);
-          if (ins) { add(ins.name, 3); winners = [ins.name]; }
-          if (fol) { add(fol.name, 2); winners.push(fol.name); }
-          outcome = "insider";
-        }
-      }
-    }
-
-    await applyLeaderboard(data.players, delta, winners);
-    const updated = { ...data, phase: "result", scores: addScores(data.scores, delta), scored: true, outcome };
-    await saveRoom(code, updated);
-    return updated;
-  }, []);
-
-  // ── Firebase リアルタイム購読 ──
-  useEffect(() => {
-    if (!roomCode) return;
-    const unsub = subscribeRoom(roomCode, async (data) => {
-      const cur = screenRef.current;
-      if (cur === "home" || cur === "lb" || cur === "tutorial" || !data) return;
-      // 主催者が部屋をリセットすると、入っていた人は players から消える。
-      // そのままでは自分のいないロビーを眺め続けることになるので、ホームへ戻して入り直してもらう。
-      if (Array.isArray(data.players) && !data.players.some((p) => p.id === myId)) {
-        const prevName = myNameRef.current;
-        doReset();
-        setFName(prevName || "");
-        setErr("部屋がリセットされたてこ。もう一度「はじめる」で入ってね");
-        return;
-      }
-      setIsMaster(data.masterId === myId);
-      setIsHost(data.hostId === myId);
-      setIsInsider(data.insiderEnc ? dec(data.insiderEnc) === myId : false);
-      setIsFollower(data.followerEnc ? dec(data.followerEnc) === myId : false);
-
-      // ── ワードウルフ／ワードジャマーは phase をそのまま各モジュールが描く ──
-      if ((data.game || "insider") !== "insider") {
-        setRoom(data);
-        if (data.phase === "lobby") { if (cur !== "lobby") { setRoleRevealed(false); setS("lobby"); } }
-        else if (cur !== "sub") { setRoleRevealed(false); setS("sub"); }
-        return;
-      }
-
-      if (data.phase === "vote") {
-        // 通常：マスターも投票する → 全員ぶん揃ったら開票。マジカル：魔術師1人の指名で開票
-        const need = data.magic ? 1 : data.players.length;
-        const got = data.magic ? (data.votes?.[data.masterId] ? 1 : 0) : Object.keys(data.votes || {}).length;
-        if (got >= need && need > 0 && !data.scored) {
-          sfxDrumroll();
-          // 採点は1台だけが行う。その端末が寝ていたら、少し待って他の端末が肩代わりする。
-          if (scorerOf(data) === myId) {
-            const updated = await finalize(roomCode, data);
-            setRoom(updated);
-            setS("result");
-            return;
-          }
-          if (!takeoverRef.current) {
-            takeoverRef.current = setTimeout(async () => {
-              takeoverRef.current = null;
-              const latest = await loadRoom(roomCode).catch(() => null);
-              if (latest && !latest.scored) {
-                const u = await finalize(roomCode, latest);
-                setRoom(u); setS("result");
-              }
-            }, TAKEOVER_MS);
-          }
-          setRoom(data);
-          return;
-        }
-      }
-
-      setRoom(data);
-      if (data.phase === "lobby" && (cur === "result" || cur === "vote" || cur === "sub" || cur === "game" || cur === "reveal")) {
-        setRoleRevealed(false); setS("lobby");
-      }
-      if (data.phase === "playing" && cur === "lobby") { setRoleRevealed(false); setS("reveal"); }
-      if (data.phase === "vote" && (cur === "game" || cur === "reveal")) setS("vote");
-      if (data.phase === "result" && cur !== "result") setS("result");
-      // 残り時間は全員が startTime から計算する（誰かの端末が止まっても影響しない）
-      if (data.phase === "playing") setTimeLeft(calcLeft(data));
-    });
-    return () => unsub();
-  }, [roomCode, myId, finalize]);
-
-  // 各端末が自分で1秒ごとに再計算する（配信に頼らないので、誰かの画面が寝ても止まらない）
-  const tlRef = useRef(0);
-  tlRef.current = timeLeft;
-  const roomRef = useRef(null);
-  roomRef.current = room;
-  useEffect(() => {
-    if (screen !== "game") return;
-    const id = setInterval(() => setTimeLeft(calcLeft(roomRef.current)), 1000);
-    return () => clearInterval(id);
-  }, [screen]);
-
-  // ── actions ──
-  const freshRoom = (name, uid = myId) => ({
-    game: "insider",
-    phase: "lobby", round: 1, peace: false, adult: false, follower: false, magic: false, masterRule: "random",
-    hostId: uid, masterId: uid, wordEnc: null,
-    insiderEnc: null, followerEnc: null, players: [{ id: uid, name }],
-    startTime: null, duration: 300, wordGuessed: false, votes: {}, qa: [], scores: {}, scored: false,
-    usedWords: [], isPeaceVillage: false, magicCards: {},
-    wolfDuration: 180, usedPairs: [], usedQuestions: [],
-  });
-
-  const doEnter = async () => {
-    if (!gateOpen && !hostUnlocked) return setErr("いまは開いてないよ。主催者がオープンにするまで待ってね");
-    if (!fName.trim()) return setErr("なまえをいれてね");
-    setLoading(true); setErr("");
-    const name = fName.trim();
-    let data = await loadRoom(ROOM);
-    let uid = myId;
-    if (!data || !data.players) {
-      data = freshRoom(name, uid);
-      await saveRoom(ROOM, data);
-    } else if (data.phase !== "lobby") {
-      // 同名の既存プレイヤーがいれば「復帰」を許可（同一アカウント扱い）
-      const sameName = data.players.find((p) => p.name === name);
-      if (!sameName) { setErr("いまゲーム中…ロビーに戻るまで待ってね（だれもいなければ下のリセット）"); setLoading(false); return; }
-      uid = sameName.id;
-    } else {
-      const sameName = data.players.find((p) => p.name === name);
-      if (sameName) {
-        uid = sameName.id; // 同名は同一アカウントとして引き継ぐ（重複させない）
-      } else {
-        let nd = { ...data, players: [...data.players, { id: uid, name }] };
-        await saveRoom(ROOM, nd); data = nd;
-      }
-      if (hostUnlocked && data.hostId !== uid) { // 主催者は部屋主（設定権）を引き継ぐ
-        const nd = { ...data, hostId: uid }; await saveRoom(ROOM, nd); data = nd;
-      }
-    }
-    if (uid !== myId) setMyId(uid);
-    setMyName(name); setRoomCode(ROOM); setRoom(data);
-    setIsMaster(data.masterId === uid); setIsHost(data.hostId === uid);
-    setS(data.phase === "lobby" || (data.game || "insider") === "insider" ? "lobby" : "sub");
-    setLoading(false);
-  };
-
-  const doResetRoom = async () => {
-    const name = (myName || fName).trim() || "プレイヤー";
-    const data = freshRoom(name);
-    await saveRoom(ROOM, data);
-    setMyName(name); setRoomCode(ROOM); setRoom(data); setIsMaster(true); setIsHost(true);
-    setRoleRevealed(false); setErr(""); setS("lobby");
-  };
-
-  const save = async (u) => { await saveRoom(ROOM, u); setRoom(u); };
-
-  const toggleOpt = async (key) => {
-    if (!room) return;
-    const u = { ...room, [key]: !room[key] };
-    // アダルトを切り替えたら現在のお題はリセット（語彙ソースが変わるため）
-    if (key === "adult") u.wordEnc = null;
-    // マジカルは平和村・フォロワーと排他
-    if (key === "magic" && u.magic) { u.peace = false; u.follower = false; }
-    if ((key === "peace" || key === "follower") && u[key]) u.magic = false;
-    await save(u);
-  };
-
-  // ゲームの切り替え（ロビーのみ・部屋主）。お題などラウンド状態はクリア、メンバー・得点は引き継ぐ
-  const setGame = async (g) => {
-    if (!room || room.phase !== "lobby") return;
-    let u = { ...room, game: g, wordEnc: null, insiderEnc: null, followerEnc: null, votes: {}, qa: [], scored: false, outcome: null, isPeaceVillage: false };
-    u = resetWolfRound(u); u = resetJammerRound(u);
-    await save(u);
-  };
-
-  const setDuration = async (sec) => { if (room) await save({ ...room, duration: sec }); };
-
-  const doExtend = async () => {
-    if (!room) return;
-    setTimeLeft(tlRef.current + 60);
-    await setRoomField(ROOM, "duration", (room.duration || 300) + 60); // 全員の計算結果が伸びる
-  };
-
-  const setMasterRule = async (rule) => {
-    if (!room) return;
-    const masterId = rule === "fixed" ? room.hostId : room.masterId;
-    await save({ ...room, masterRule: rule, masterId });
-  };
-
-  const doGenWord = async () => {
-    setErr("");
-    const word = pickWord(cat, room?.usedWords || [], !!room?.adult);
-    await save({ ...room, wordEnc: enc(word) });
-  };
-
-  const doStart = async () => {
-    if (!room?.wordEnc) return setErr("お題を決めてね");
-    if (room.players.length < 3) return setErr("3人以上ひつようだてこ");
-    const nonMasters = room.players.filter((p) => p.id !== room.masterId);
-    let followerEnc = null;
-    const magic = !!room.magic;
-    const isPeaceVillage = !magic && !!room.peace && Math.random() < 0.1; // 平和村は10%
-    const insider = isPeaceVillage ? null : nonMasters[Math.floor(Math.random() * nonMasters.length)];
-    const insiderEnc = insider ? enc(insider.id) : null;
-    // フォロワー：6人以上＆インサイダー在のときだけ、インサイダー以外から1名（マジカル時は無し）
-    if (!magic && room.follower && insider && room.players.length >= 6) {
-      const pool = nonMasters.filter((p) => p.id !== insider.id);
-      if (pool.length) followerEnc = enc(pool[Math.floor(Math.random() * pool.length)].id);
-    }
-    // マジカル：村人チーム全員に魔術カードを配る
-    const magicCards = {};
-    if (magic) {
-      const cards = dealMagicCards(nonMasters.length);
-      nonMasters.forEach((p, i) => { magicCards[p.id] = cards[i]; });
-    }
-    const u = { ...room, phase: "playing", insiderEnc, followerEnc, isPeaceVillage, magicCards,
-      startTime: Date.now(), timeLeft: room.duration || 300, usedWords: [...(room.usedWords || []), dec(room.wordEnc)] };
-    await saveRoom(ROOM, u);
-    setRoom(u); setIsInsider(false); setIsFollower(false); setTimeLeft(u.duration); setS("reveal");
-  };
-
-  // ワードウルフ／ジャマーの開始（部屋主）
-  const doStartSub = async () => {
-    if (!room) return;
-    if (room.players.length < 3) return setErr("3人以上ひつようだてこ");
-    setErr("");
-    const u = game === "wordwolf" ? startWolfRound(room) : startJammerRound(room);
-    await saveRoom(ROOM, u);
-    setRoom(u); setRoleRevealed(false); setS("sub");
-  };
-
-  // 質問・回答・投票は「部屋まるごと上書き」ではなく必要な枝だけ更新する。
-  // 全体を書くと、他の人が同時に押した操作（票など）を自分の古いスナップショットで消してしまう。
-  const doAsk = async () => {
-    if (!qInput.trim() || !room) return;
-    const qa = room.qa || [];
-    if (qa.length > 0 && isUnanswered(qa[qa.length - 1])) return;
-    await setRoomField(ROOM, `qa/${qa.length}`, { id: genId(), q: qInput.trim(), ans: null, by: myName });
-    setQInput("");
-  };
-
-  const doAnswer = async (ans) => {
-    const qa = room?.qa || [];
-    if (!qa.length || !isUnanswered(qa[qa.length - 1])) return;
-    await setRoomField(ROOM, `qa/${qa.length - 1}/ans`, ans);
-  };
-
-  const doWordGuessed = async () => {
-    sfxCorrect();
-    const u = { ...room, phase: "vote", wordGuessed: true };
-    await saveRoom(ROOM, u); setRoom(u); setS("vote");
-  };
-
-  const doTimeUp = async () => {
-    const u = await finalize(ROOM, { ...room, wordGuessed: false });
-    setRoom(u); setS("result");
-  };
-
-  const doVote = async (targetId) => {
-    if (!room || room.votes?.[myId]) return;
-    await setRoomField(ROOM, `votes/${myId}`, targetId); // 自分の票だけ書く（他人の票を消さない）
-  };
-
-  // 電波不良などで全員の票が揃わないとき、主催者が今ある票で強制開票
-  const doForceFinalize = async () => {
-    if (!room || room.scored) return;
-    sfxDrumroll();
-    const u = await finalize(ROOM, room);
-    setRoom(u); setS("result");
-  };
-
-  // 次のラウンド（全ゲーム共通：ロビーへ戻す）
-  const doNextRound = async () => {
-    const newMaster = nextMaster(room.players, room.masterId, room.masterRule || "random", room.hostId);
-    let u = { ...room, phase: "lobby", round: (room.round || 1) + 1, masterId: newMaster,
-      wordEnc: null, insiderEnc: null, followerEnc: null, isPeaceVillage: false, magicCards: {},
-      startTime: null, wordGuessed: false, votes: {}, qa: [], scored: false, outcome: null };
-    u = resetWolfRound(u); u = resetJammerRound(u);
-    await saveRoom(ROOM, u);
-    setRoom(u); setRoleRevealed(false); setS("lobby");
-  };
-
-  const doReset = () => {
-    setS("home"); setMyName(""); setIsMaster(false); setIsInsider(false);
-    setRoomCode(""); setRoom(null); setRoleRevealed(false); setQInput(""); setErr(""); setFName("");
-    setIsFollower(false); setIsHost(false);
-  };
-
-  const openLb = async () => { setLb(await loadLeaderboard()); setS("lb"); };
+  const closeOverlay = () => setS(roomCode && roomRef.current ? screenFor(roomRef.current, overlayBack) : "home");
 
   const doClearLeaderboard = async () => {
     if (!window.confirm("通算成績を全部消すよ？（全員ぶん・元に戻せない）")) return;
@@ -536,54 +276,127 @@ export default function TekomiInsider() {
     setLb({});
   };
 
-  const backHome = () => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) doReset(); };
-  const lbBack = () => setS(roomCode ? (room?.phase === "lobby" ? "lobby" : game === "insider" ? "result" : "sub") : "home");
+  // ── ロビーの設定（部屋主）。変える項目だけ書く＝同時に入ってきた人を消さない ──
+  const toggleOpt = (key) => {
+    if (!room) return;
+    const patch = { [key]: !room[key] };
+    if (key === "adult") patch.wordEnc = null; // 語彙が変わるので、引いたお題は引き直し
+    if (key === "magic" && patch.magic) { patch.peace = false; patch.follower = false; }
+    if ((key === "peace" || key === "follower") && patch[key]) patch.magic = false;
+    updateRoom(ROOM, patch);
+  };
+  const setGame = (g) => {
+    if (!room || room.phase !== "lobby" || room.game === g) return;
+    updateRoom(ROOM, { game: g, wordEnc: null, wolf: null, wolfEndAt: null, jam: null, votes: null, qa: null, scored: false, outcome: null });
+  };
+  const setMasterRule = (rule) => {
+    if (!room) return;
+    updateRoom(ROOM, { masterRule: rule, ...(rule === "fixed" ? { masterId: room.hostId } : {}) });
+  };
+
+  // ── インサイダーの進行 ──────────────────────────────
+  const doGenWord = () => updateRoom(ROOM, { wordEnc: enc(pickWord(cat, room?.usedWords || [], !!room?.adult)) });
+  const doStart = async () => {
+    setErr("");
+    const res = await transactRoom(ROOM, (cur) => startInsider(cur, { deal: dealMagicCards }));
+    if (!res.committed) setErr("始められなかったてこ（お題と3人以上が必要）");
+  };
+  const doStartSub = async () => {
+    setErr("");
+    const res = await transactRoom(ROOM, (cur) => {
+      if (!cur || cur.phase !== "lobby" || (cur.players || []).length < 3) return undefined;
+      return (cur.game || "insider") === "wordwolf" ? startWolfRound(cur) : startJammerRound(cur);
+    });
+    if (!res.committed) setErr("始められなかったてこ（3人以上が必要）");
+  };
+  const doAsk = async () => {
+    const q = qInput.trim();
+    if (!q) return;
+    const res = await transactRoom(ROOM, (cur) => {
+      if (!cur || cur.phase !== "playing") return undefined;
+      const qa = cur.qa || [];
+      if (qa.length && isUnanswered(qa[qa.length - 1])) return undefined; // 1問ずつ
+      return { ...cur, qa: [...qa, { id: genId(), q: q.slice(0, 60), by: myName }] };
+    });
+    if (res.committed) setQInput("");
+  };
+  const doAnswer = (i, ans) => setRoomField(ROOM, `qa/${i}/ans`, ans);
+  const doWordGuessed = async () => {
+    const res = await transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, phase: "vote", wordGuessed: true, votes: null } : undefined));
+    if (res.committed) sfxCorrect();
+  };
+  const doExtend = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, duration: (cur.duration || 300) + 60 } : undefined));
+  const doTimeUp = () => finalizeRound((cur) => (cur.phase === "playing"
+    ? { ...scoreInsider({ ...cur, wordGuessed: false }), patch: { wordGuessed: false } } : null));
+  const doVote = async (targetId) => {
+    if (!targetId || room?.votes?.[myId]) return;
+    sfxVote(); buzz(40);
+    await setRoomField(ROOM, `votes/${myId}`, targetId); // 自分の票だけ書く（他人の票を消さない）
+  };
+  const doForceFinalize = () => finalizeRound((cur) => (cur.phase === "vote" ? scoreInsider(cur) : null));
+  const doNextRound = () => transactRoom(ROOM, (cur) => (cur?.phase === "result" ? toLobby(cur) : undefined));
+  const doAbort = () => {
+    if (!window.confirm("このラウンドを中止してロビーにもどる？（点数は入らない）")) return;
+    transactRoom(ROOM, (cur) => (cur && cur.phase !== "lobby" ? toLobby(cur) : undefined));
+  };
 
   // ════ HOME ════
   if (screen === "home") return (
     <Shell>
-      <div style={{ textAlign: "center", padding: "20px 0 16px" }}>
-        <Logo width={250} />
-        <div style={{ display: "flex", justifyContent: "center", margin: "12px 0 6px" }}><OwlDoc size={96} bob /></div>
+      <div className="center" style={{ padding: "16px 0 8px" }}>
+        <Logo />
+        <div style={{ display: "flex", justifyContent: "center", margin: "12px 0 4px" }}><OwlDoc size={96} bob /></div>
         <div className="mp-sub">～みんなでなぞを解け！～</div>
-        <div style={{ fontSize: 10, marginTop: 8, color: "#bbb", textShadow: "1px 1px 0 #000", letterSpacing: 1 }}>🕵️ インサイダー ／ 🐺 ワードウルフ ／ 📝 ワードジャマー</div>
+        <div style={{ display: "flex", justifyContent: "center", gap: 14, marginTop: 12, fontSize: 13, color: "#ddd", textShadow: "1px 1px 0 #000" }}>
+          {Object.values(GAMES).map((g) => <span key={g.icon} style={{ display: "flex", alignItems: "center", gap: 5 }}><Icon name={g.icon} size={24} />{g.short}</span>)}
+        </div>
       </div>
 
+      {resume && (
+        <button className="btn btn-gold pop" onClick={() => doEnter(resume)} disabled={loading} style={{ marginTop: 10 }}>
+          <Icon name="arrowR" size={24} />「{resume}」でつづきから
+        </button>
+      )}
+
       {gateOpen === null ? (
-        <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 22 }}>…よみこみ中…</div>
+        <Panel><div className="panel-note center" style={{ padding: 10 }}>…よみこみ中…</div></Panel>
       ) : (gateOpen || hostUnlocked) ? (
-        <div className="mp-panel">
-          <input className="mp-input" placeholder="あなたのなまえ" value={fName}
-            onChange={(e) => setFName(e.target.value)} maxLength={10} />
-          <button className="mp-btn mp-green" onClick={doEnter} disabled={loading}>
-            {loading ? "…" : "▶ はじめる"}
+        <Panel>
+          <input className="mp-input" placeholder="あなたのなまえ（10文字まで）" value={fName} maxLength={10} enterKeyHint="go"
+            onChange={(e) => setFName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doEnter(); }} />
+          <button className={`btn ${resume ? "btn-cream" : "btn-gold"}`} onClick={() => doEnter()} disabled={loading} style={{ marginBottom: 0 }}>
+            <Icon name="arrowR" size={24} />{loading ? "…" : resume ? "この名前ではじめる" : "はじめる"}
           </button>
-          {hostUnlocked && (
-            <button className="mp-btn mp-blue" onClick={doResetRoom} style={{ marginBottom: 0 }}>🔄 部屋をリセットして新しく始める</button>
-          )}
-          {hostUnlocked && !gateOpen && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 6 }}>※今はクローズ中。下でオープンにすると みんな入れるよ</div>}
-        </div>
+          {hostUnlocked && !gateOpen && <div className="panel-note center" style={{ marginTop: 10, color: "#c62828" }}>いまはクローズ中。下の「オープンにする」でみんなが入れるてこ</div>}
+        </Panel>
       ) : (
-        <div className="mp-panel" style={{ textAlign: "center", padding: 22 }}>
-          <div style={{ fontSize: 30 }}>🔒</div>
-          <div style={{ fontSize: 14, fontWeight: 700, margin: "6px 0" }}>いまは閉まっています</div>
-          <div style={{ fontSize: 11, color: "#666" }}>主催者がオープンにするまで待ってね</div>
-        </div>
+        <Panel>
+          <div className="center" style={{ padding: "6px 0" }}>
+            <div style={{ display: "flex", justifyContent: "center" }}><Icon name="lock" size={48} /></div>
+            <div style={{ fontSize: 17, margin: "8px 0 4px" }}>いまは閉まっています</div>
+            <div className="panel-note">主催者がオープンにするまで待ってね</div>
+          </div>
+        </Panel>
       )}
-
-      {hostUnlocked ? (
-        gateOpen
-          ? <button className="mp-btn mp-red" onClick={() => setGate(false)}>🔒 クローズする（締め切る）</button>
-          : <button className="mp-btn mp-green" onClick={() => setGate(true)}>🔓 オープンにする（みんな入れる）</button>
-      ) : (
-        <button className="mp-btn mp-blue" onClick={tryHostUnlock}>🔑 主催者メニュー</button>
-      )}
-
-      <button className="mp-btn mp-yellow" onClick={() => { setGuideBack("home"); setS("tutorial"); }}>📖 あそびかた</button>
-      <button className="mp-btn mp-blue" onClick={openLb}>★ つうさんせいせき</button>
-      <button className="mp-btn mp-yellow" onClick={toggleSound}>{soundOn ? "🔊 こうかおん ON" : "🔇 こうかおん OFF"}</button>
 
       <ErrBox>{err}</ErrBox>
+
+      <div className="btn-row">
+        <button className="btn btn-cream btn-col" onClick={() => openOverlay("tutorial")}><Icon name="book" size={36} />あそびかた</button>
+        <button className="btn btn-cream btn-col" onClick={() => openOverlay("lb")}><Icon name="trophy" size={36} />せいせき</button>
+        <button className="btn btn-cream btn-col" onClick={toggleSound}><Icon name={soundOn ? "sound" : "mute"} size={36} />{soundOn ? "音 ON" : "音 OFF"}</button>
+      </div>
+
+      {hostUnlocked ? (
+        <Panel head="主催者メニュー" icon="key">
+          {gateOpen
+            ? <button className="btn btn-red btn-sm" onClick={() => setGate(false)}><Icon name="lock" size={24} />クローズする（締め切る）</button>
+            : <button className="btn btn-gold btn-sm" onClick={() => setGate(true)}><Icon name="unlock" size={24} />オープンにする（みんな入れる）</button>}
+          <button className="btn btn-dark btn-sm" onClick={doResetRoom} style={{ marginBottom: 0 }}><Icon name="refresh" size={24} />部屋をリセットして新しく始める</button>
+        </Panel>
+      ) : (
+        <button className="btn btn-dark btn-sm" onClick={tryHostUnlock}><Icon name="key" size={24} />主催者メニュー</button>
+      )}
 
       <Bubble arrow>
         ようこそてこ！<br />なまえを入れて「はじめる」を押すてこ。ロビーで インサイダー／ワードウルフ／ワードジャマー を選べるてこ。はじめてなら「あそびかた」を見るといいてこ！
@@ -591,454 +404,392 @@ export default function TekomiInsider() {
     </Shell>
   );
 
-  // ════ TUTORIAL（ビジュアル説明書）════
-  if (screen === "tutorial") return <Guide onClose={() => setS(guideBack)} />;
+  // ════ あそびかた ════
+  if (screen === "tutorial") return <Guide onClose={closeOverlay} initialTab={shot?.guideTab} />;
 
-  // ════ LEADERBOARD ════
+  // ════ 通算成績 ════
   if (screen === "lb") {
     const rows = Object.entries(lb || {}).sort((a, b) => b[1].pts - a[1].pts);
+    const spread = rows.length > 1 && rows[0][1].pts > rows[rows.length - 1][1].pts;
+    const top = rows[0]?.[1].pts, bottom = rows[rows.length - 1]?.[1].pts;
     return (
       <Shell>
-        <Header sub="つうさんせいせき" onBack={lbBack} />
-        <div className="mp-h">★ つうさん せいせき ★</div>
-        <div className="mp-panel">
-          {rows.length === 0 && <div style={{ color: "#666", fontSize: 13, textAlign: "center", padding: "16px 0" }}>まだ記録がないてこ</div>}
-          {rows.map(([name, e], i) => {
-            const spread = rows.length > 1 && rows[0][1].pts > rows[rows.length - 1][1].pts;
-            const icon = spread ? (i === 0 ? "👑" : i === rows.length - 1 ? "💩" : "") : "";
-            return (
-            <div key={name} className="mp-row" style={{ padding: "9px 0", borderBottom: i < rows.length - 1 ? "2px dashed #ddd" : "none" }}>
-              <div style={{ width: 26, fontSize: 18, color: i === 0 ? "#E53935" : "#888", WebkitTextStroke: i === 0 ? "0.5px #000" : "none" }}>{i + 1}</div>
-              <div style={{ flex: 1, fontSize: 13, color: "#111", fontWeight: i === 0 ? 700 : 400 }}>{icon ? icon + " " : ""}{name}</div>
-              <div style={{ fontSize: 10, color: "#888", marginRight: 10 }}>{e.wins}勝/{e.games}戦</div>
-              <div style={{ fontSize: 17, color: "#D4AF37", WebkitTextStroke: "0.5px #000" }}>{e.pts}<span style={{ fontSize: 9, color: "#888" }}>pt</span></div>
+        <Header title="つうさんせいせき" icon="trophy" onHome={closeOverlay} />
+        <Panel head="名前ごとの通算" icon="trophy">
+          {rows.length === 0 && <div className="panel-note center" style={{ padding: "14px 0" }}>まだ記録がないてこ</div>}
+          {rows.map(([name, e], i) => (
+            <div key={name} className="prow">
+              <span style={{ width: 28, fontSize: 20, color: i === 0 ? "#c62828" : "#777", textAlign: "center" }}>{i + 1}</span>
+              <span className="prow-mark">{spread && e.pts === top ? <Icon name="crown" size={24} /> : spread && e.pts === bottom ? <Icon name="poop" size={24} /> : null}</span>
+              <span className="prow-nm">{name}</span>
+              <span className="prow-note">{e.wins}勝／{e.games}戦</span>
+              <span className="prow-pt">{e.pts}<small>pt</small></span>
             </div>
-            );
-          })}
-        </div>
-        <button className="mp-btn mp-yellow" onClick={lbBack}>◀ もどる</button>
-        <button className="mp-btn mp-red" onClick={doClearLeaderboard} style={{ fontSize: 12 }}>🗑 通算成績をリセット</button>
+          ))}
+        </Panel>
+        <button className="btn btn-cream" onClick={closeOverlay}><Icon name="arrowL" size={24} />もどる</button>
+        {hostUnlocked && <button className="btn btn-dark btn-sm" onClick={doClearLeaderboard}><Icon name="trash" size={24} />通算成績をリセット（主催者）</button>}
       </Shell>
     );
   }
 
-  // ════ LOBBY（全ゲーム共通）════
+  // ════ ロビー（全ゲーム共通）════
   if (screen === "lobby") {
-    const players = room?.players || [];
-    const wordSet = !!room?.wordEnc;
-    const adult = !!room?.adult;
-    const magic = !!room?.magic;
-    const flair = computeFlair(players, lb);
     const G = GAMES[game];
+    const flair = computeFlair(players, lb);
+    const wordSet = !!room?.wordEnc;
     const masterName = players.find((p) => p.id === room?.masterId)?.name || "?";
     const rule = room?.masterRule || "random";
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1}`} onBack={backHome} title={`てこみの ${G.label}`} />
+        <Header title={G.label} icon={G.icon} sub={`ROUND ${room?.round || 1}`} onHome={doLeave} />
 
-        {/* いま遊ぶゲーム */}
-        <div className="mp-panel" style={{ textAlign: "center", padding: 10, borderColor: G.color }}>
-          <span style={{ fontSize: 10, color: "#888" }}>いまのゲーム</span>
-          <div style={{ fontSize: 18, color: G.color, WebkitTextStroke: "0.4px #000" }}>{G.emoji} {G.label}</div>
-          <div style={{ fontSize: 10, color: "#666" }}>{G.desc}</div>
-        </div>
-
-        <div className="mp-panel">
-          <div className="mp-panel-head">★ プレイヤー {players.length}名 ★</div>
-          {players.map((p) => (
-            <div key={p.id} className="mp-row" style={{ padding: "6px 2px" }}>
-              <span style={{ fontSize: 13, color: game === "insider" && p.id === room?.masterId ? "#E53935" : "#111" }}>
-                {flair[p.name] ? flair[p.name] + " " : (game === "insider" && p.id === room?.masterId ? "🎤 " : "・ ")}{p.name}{p.id === myId ? "（あなた）" : ""}
-              </span>
-              <span style={{ fontSize: 13, color: "#D4AF37" }}>{(room?.scores || {})[p.name] || 0}pt</span>
+        <Panel head={`プレイヤー ${players.length}人`} icon="people">
+          <PlayerRows players={players} scores={room?.scores} myId={myId}
+            mark={(p) => flair[p.name] || (game === "insider" && p.id === room?.masterId ? (magic ? "wizard" : "mic") : null)}
+            note={(p) => (p.id === room?.hostId ? <span className="prow-note">部屋主</span> : null)}
+            onKick={isHost && kickMode ? doKick : undefined} />
+          {players.length < G.min && <div className="panel-note center" style={{ color: "#c62828", marginTop: 8 }}>あと{G.min - players.length}人でスタートできるてこ</div>}
+          {game === "insider" && (
+            <div className="note-bar" style={{ background: "#fff", margin: "10px 0 0", justifyContent: "flex-start", textAlign: "left", fontSize: 14 }}>
+              <Icon name={magic ? "wizard" : "mic"} size={24} />
+              <span>今回の{magic ? "魔術師" : "マスター"}：<b style={{ color: "#c62828", fontSize: 16 }}>{masterName}</b>{room?.masterId === myId ? "（あなた）" : ""}
+                <br /><span className="small">決め方：{MASTER_RULES.find((r) => r.k === rule)?.label}{room?.masterId !== myId ? (wordSet ? "・お題は準備OK" : "・お題をえらび中") : ""}</span></span>
             </div>
-          ))}
-          {players.length < G.min && <div style={{ fontSize: 11, color: "#E53935", textAlign: "center", marginTop: 6 }}>あと{G.min - players.length}名でスタートできるてこ</div>}
-        </div>
+          )}
+          {isHost && players.length > 1 && (
+            <button className="btn btn-cream btn-sm" onClick={() => setKickMode((k) => !k)} style={{ margin: "12px 0 0" }}>
+              <Icon name="cross" size={24} />{kickMode ? "外すのをやめる" : "帰った人を外す"}
+            </button>
+          )}
+        </Panel>
 
         {isHost && (
-          <div className="mp-panel">
-            <div className="mp-panel-head">★ ゲームをえらぶ（部屋主） ★</div>
-            {Object.entries(GAMES).map(([k, g]) => (
-              <ModeCard key={k} on={game === k} color={g.color} emoji={g.emoji} label={g.label} desc={g.desc} onClick={() => setGame(k)} />
-            ))}
-          </div>
+          <Panel head="ゲームをえらぶ" icon="star">
+            <div className="tiles">
+              {Object.entries(GAMES).map(([k, g]) => <Tile key={k} on={game === k} color={g.color} icon={g.icon} label={g.short} onClick={() => setGame(k)} />)}
+            </div>
+            <div className="panel-note center" style={{ marginTop: 10 }}>{G.desc}</div>
+          </Panel>
         )}
 
         {game === "insider" && (
           <>
-            <div className="mp-panel" style={{ textAlign: "center", padding: 10 }}>
-              <span style={{ fontSize: 10, color: "#888" }}>今回の{magic ? "魔術師" : "マスター"}（{MASTER_RULES[rule].label}）</span>
-              <div style={{ fontSize: 18, color: "#E53935", WebkitTextStroke: "0.4px #000" }}>{magic ? "🧙" : "🎤"} {masterName}{room?.masterId === myId ? "（あなた）" : ""}</div>
-            </div>
-
             {isHost && (
-              <div className="mp-panel">
-                <div className="mp-panel-head">★ ゲーム設定（部屋主） ★</div>
-                <div style={{ fontSize: 10, color: "#888", marginBottom: 6, letterSpacing: 1 }}>オプション（自由にON/OFF・組み合わせOK）</div>
-                {OPTS.map((o) => (
-                  <ModeCard key={o.key} on={!!room[o.key]} color={o.color} emoji={o.emoji} label={o.label} desc={o.desc} toggle onClick={() => toggleOpt(o.key)} />
-                ))}
-                {room.follower && players.length < 6 && !magic && (
-                  <div style={{ fontSize: 10, color: "#a020e0", textAlign: "center", marginTop: 2 }}>※フォロワーは6人以上で有効。今は{players.length}人なので未発動</div>
-                )}
-                {magic && <div style={{ fontSize: 10, color: "#5b8def", textAlign: "center", marginTop: 2 }}>※マジカル中は平和村・フォロワーは使えないてこ</div>}
-
-                <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>{magic ? "魔術師" : "マスター"}の決め方</div>
-                {Object.entries(MASTER_RULES).map(([k, r]) => (
-                  <ModeCard key={k} on={rule === k} emoji={r.emoji} label={r.label} desc={r.desc} onClick={() => setMasterRule(k)} />
-                ))}
-
-                <div style={{ fontSize: 10, color: "#888", margin: "12px 0 6px", letterSpacing: 1 }}>せいげん時間</div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  {TIMES.map((t) => (
-                    <button key={t.s} onClick={() => setDuration(t.s)} style={{
-                      flex: 1, padding: "9px 0", borderRadius: 8, fontSize: 13, cursor: "pointer", fontFamily: "inherit",
-                      border: "2.5px solid #000", boxShadow: (room.duration || 300) === t.s ? "0 3px 0 #D4AF37" : "0 3px 0 #000",
-                      background: (room.duration || 300) === t.s ? "#D4AF37" : "#fff", color: "#111" }}>{t.label}</button>
-                  ))}
-                </div>
-              </div>
+              <Panel head="ゲーム設定（部屋主）" icon="key">
+                {OPTS.map((o) => <OptRow key={o.key} on={!!room[o.key]} color={o.color} icon={o.icon} label={o.label} desc={o.desc} onClick={() => toggleOpt(o.key)} />)}
+                {room.follower && players.length < 6 && !magic && <div className="panel-note center">フォロワーは6人以上で有効（いまは{players.length}人）</div>}
+                {magic && <div className="panel-note center">マジカル中は 平和村・フォロワー は使えないてこ</div>}
+                <div className="label">{magic ? "魔術師" : "マスター"}の決め方</div>
+                <Seg items={MASTER_RULES} value={rule} onChange={setMasterRule} />
+                <div className="label">せいげん時間</div>
+                <Seg items={TIMES} value={room.duration || 300} onChange={(s) => updateRoom(ROOM, { duration: s })} />
+              </Panel>
             )}
 
             {isMaster ? (
               <>
-                <div className="mp-panel">
-                  <div className="mp-panel-head">★ お題をきめる（あなたが{magic ? "魔術師" : "マスター"}） ★</div>
-                  {adult ? (
-                    <div style={{ fontSize: 11, color: "#a020e0", textAlign: "center", marginBottom: 10, lineHeight: 1.5 }}>
-                      🌶️ アダルト専用のきわどいお題から出るてこ<br />（カテゴリは選べないてこ）
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
-                      {CATS.map((c) => (
-                        <button key={c} onClick={() => setCat(c)} style={{
-                          padding: "6px 10px", borderRadius: 8, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-                          border: `2.5px solid #000`, boxShadow: "0 2px 0 #000",
-                          background: cat === c ? "#D4AF37" : "#fff", color: "#111" }}>{c}</button>
-                      ))}
-                    </div>
-                  )}
-                  <button className="mp-btn mp-yellow" onClick={doGenWord}>🎲 お題をひく</button>
+                <Panel head={`お題をきめる（あなたが${magic ? "魔術師" : "マスター"}）`} icon={magic ? "wizard" : "mic"}>
+                  {room?.adult
+                    ? <div className="panel-note center" style={{ color: "#8a1fc2", marginBottom: 10 }}>アダルト専用のお題から出るてこ（カテゴリは選べない）</div>
+                    : <div className="chips">{CATS.map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div>}
+                  <button className="btn btn-cream btn-sm" onClick={doGenWord}><Icon name="dice" size={24} />{wordSet ? "お題を引き直す" : "お題をひく"}</button>
                   {wordSet && (
-                    <div style={{ textAlign: "center", padding: 10, background: "#fff8dc", border: "3px solid #000", borderRadius: 8, marginBottom: 4 }}>
-                      <span style={{ fontSize: 9, color: "#888" }}>いまのお題　</span>
-                      <span style={{ fontSize: 20, color: "#E53935", WebkitTextStroke: "0.5px #000" }}>「{dec(room.wordEnc)}」</span>
-                    </div>
+                    <Secret label="引いたお題" hint="押しているあいだだけ見える（まわりに見せない）">
+                      <div className="center" style={{ fontSize: 26, color: "#c62828" }}>「{dec(room.wordEnc)}」</div>
+                    </Secret>
                   )}
-                </div>
-                <button className="mp-btn mp-red" onClick={doStart} disabled={!wordSet || players.length < 3}>
-                  {players.length < 3 ? `あと${3 - players.length}名` : !wordSet ? "お題をきめてね" : "▶ ゲームスタート！"}
+                </Panel>
+                <button className="btn btn-red" onClick={doStart} disabled={!wordSet || players.length < 3}>
+                  <Icon name="arrowR" size={24} />{players.length < 3 ? `あと${3 - players.length}人` : !wordSet ? "お題をひいてね" : "ゲームスタート！"}
                 </button>
                 <ErrBox>{err}</ErrBox>
               </>
             ) : (
-              <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 12, padding: 22 }}>
-                {magic ? "🧙" : "🎤"} {masterName} がお題を準備中…<br />
-                <span style={{ fontSize: 11, color: "#D4AF37" }}>モード：{optsSummary(room)}</span><br />
-                <span style={{ fontSize: 11 }}>{wordSet ? "お題は準備OK" : "お題をえらび中"}</span>
-              </div>
+              <div className="note-bar note-dark"><span>モード：{optsSummary(room)} ／ {magic ? "魔術師" : "マスター"}のスタートを待つてこ</span></div>
             )}
             <PointsPanel magic={magic} />
           </>
         )}
 
-        {game === "wordwolf" && (
-          <WolfSettings room={room} isHost={isHost} save={save} onStart={doStartSub} err={err} />
-        )}
-        {game === "jammer" && (
-          <JammerSettings room={room} isHost={isHost} save={save} onStart={doStartSub} err={err} />
-        )}
+        {game === "wordwolf" && <WolfSettings room={room} isHost={isHost} onStart={doStartSub} err={err} />}
+        {game === "jammer" && <JammerSettings room={room} isHost={isHost} onStart={doStartSub} err={err} />}
 
-        <button className="mp-btn mp-yellow" onClick={() => { setGuideBack("lobby"); setS("tutorial"); }}>📖 あそびかた（ルールを見る）</button>
-        {isHost && <button className="mp-btn mp-blue" onClick={doResetRoom}>🔄 部屋をリセット</button>}
+        <button className="btn btn-cream btn-sm" onClick={() => openOverlay("tutorial")}><Icon name="book" size={24} />あそびかた（ルールを見る）</button>
+        {isHost && <HostMenu><button className="btn btn-dark btn-sm" onClick={doResetRoom}><Icon name="refresh" size={24} />部屋をリセット（全員ホームへ）</button></HostMenu>}
         <Bubble>
           {game !== "insider"
-            ? (isHost ? `${G.label}だてこ！設定を決めて「スタート」を押すてこ` : `今回は${G.label}だてこ。部屋主のスタートを待つてこ🍺`)
-            : isMaster ? (magic ? "キミが今回の魔術師！お題を引いてスタートだてこ。村人チームの中のインサイダーを見破るてこ！" : "キミが今回のマスター！お題を引いてスタートだてこ！")
-            : isHost ? "設定はキミ（部屋主）が管理てこ。マスターがお題を引くのを待つてこ" : "今回のマスターが準備中てこ。ちょっと待つてこ🍺"}
+            ? (isHost ? `${G.label}だてこ！ 設定を決めて「スタート」を押すてこ` : `今回は${G.label}だてこ。部屋主のスタートを待つてこ`)
+            : isMaster ? (magic ? "キミが今回の魔術師！ お題を引いてスタートだてこ。村人チームの中のインサイダーを見破るてこ！" : "キミが今回のマスター！ お題を引いてスタートだてこ！")
+            : isHost ? "設定はキミ（部屋主）が決めるてこ。帰った人は × で外せるてこ" : "今回のマスターが準備中てこ。ちょっと待つてこ"}
         </Bubble>
       </Shell>
     );
   }
 
-  // ════ ワードウルフ／ワードジャマー（各モジュールへ委譲）════
+  // ════ ワードウルフ／ワードジャマー（各モジュールへ）════
   if (screen === "sub") {
-    const common = { room, myId, myName, isHost, save, lb, onNextRound: doNextRound, onLeave: doReset, openLb };
+    const common = { room, myId, myName, isHost, lb, onHome: goHome, onAbort: doAbort, onNextRound: doNextRound, openLb: () => openOverlay("lb") };
     return game === "wordwolf" ? <WolfGame {...common} /> : <JammerGame {...common} />;
   }
 
-  // ── 役職判定（インサイダー）──
-  const magic = !!room?.magic;
-  let role;
-  if (isMaster) role = magic ? "wizard" : "master";
-  else if (isFollower) role = "follower";
-  else role = isInsider ? "insider" : (magic ? "villager" : "common");
+  // ── インサイダーの役職 ──
+  const role = roleOf(room, myId);
+  const R = ROLES[role];
   const knowsWord = ["master", "wizard", "insider"].includes(role);
+  const word = dec(room?.wordEnc || "");
   const myCard = room?.magicCards?.[myId];
-  const insName = room?.players?.find((p) => p.id === dec(room?.insiderEnc || ""))?.name;
+  const insName = players.find((p) => p.id === dec(room?.insiderEnc || ""))?.name;
+  const folName = players.find((p) => p.id === dec(room?.followerEnc || ""))?.name;
+  const hdr = <Header title={magic ? "マジカル" : "インサイダー"} icon={magic ? "wand" : "eye"} sub={`ROUND ${room?.round || 1}`} onHome={goHome} />;
 
-  // ════ REVEAL ════
-  if (screen === "reveal") {
-    const word = dec(room?.wordEnc || "");
-    const folName = room?.players?.find((p) => p.id === dec(room?.followerEnc || ""))?.name;
-    const roleMeta = {
-      master:   { name: "マスター", color: "#D4AF37", desc: "質問に YES / NO で答えるてこ" },
-      wizard:   { name: "魔術師", color: "#5b8def", desc: "質問に YES / NO で答え、最後にインサイダーを見破るてこ" },
-      insider:  { name: "インサイダー", color: "#E53935", desc: magic ? "村人はキミが誰か知ってる。魔術師にだけバレないように導くてこ" : "正体を隠して、みんなをお題へ導くてこ" },
-      common:   { name: "コモン", color: "#D4AF37", desc: "質問でお題を当てて、潜入者を暴くてこ" },
-      villager: { name: "村人", color: "#5b8def", desc: "お題は知らない。インサイダーをかばいながらお題を当てるてこ" },
-      follower: { name: "フォロワー", color: "#a020e0", desc: "お題は知らないが、インサイダーの味方てこ" },
-    }[role];
-    return (
-      <Shell>
-        {!roleRevealed ? (
-          <div style={{ textAlign: "center", paddingTop: 50 }}>
-            <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}><OwlDoc size={88} bob expr="surprised" /></div>
-            <div className="mp-title" style={{ fontSize: 22 }}>{myName} へ</div>
-            <div style={{ fontSize: 12, margin: "14px 0 28px", textShadow: "1px 1px 0 #000", lineHeight: 1.8 }}>
-              役職をくばるてこ。<br />ほかの人に見られないようにてこ！
-            </div>
-            <button className="mp-btn mp-red" style={{ maxWidth: 260, margin: "0 auto" }} onClick={() => setRoleRevealed(true)}>▶ 開封する</button>
-          </div>
-        ) : (
-          <div style={{ textAlign: "center", paddingTop: 30 }}>
-            <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}><OwlDoc size={70} bob /></div>
-            <div className="mp-title" style={{ fontSize: 30, color: roleMeta.color }}>{roleMeta.name}</div>
-            <div style={{ fontSize: 12, margin: "10px 0 22px", textShadow: "1px 1px 0 #000" }}>{roleMeta.desc}</div>
-            <div className="mp-panel" style={{ padding: 22 }}>
-              <div className="mp-panel-head" style={{ background: roleMeta.color }}>お題</div>
-              <div style={{ fontSize: 30, color: roleMeta.color, WebkitTextStroke: "0.5px #000" }}>
-                {knowsWord ? `「${word}」` : <Redacted />}
-              </div>
+  // 役とお題（役職配りと、ゲーム中の「押して見る」カードで共用）
+  const roleCard = (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <RoleChar role={role} size={48} bob={false} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 20, color: R.color }}>{R.name}</div>
+          <div className="small" style={{ lineHeight: 1.5 }}>{R.desc}</div>
+        </div>
+      </div>
+      <div className="center" style={{ margin: "12px 0 4px", fontSize: knowsWord ? 28 : 16, color: knowsWord ? "#c62828" : "#666" }}>
+        {knowsWord ? `「${word}」` : "お題はナイショ（知らない役）"}
+      </div>
+      {(role === "follower" || role === "villager") && insName && (
+        <div className="center" style={{ fontSize: 15 }}>インサイダーは <b style={{ color: "#c62828", fontSize: 18 }}>{insName}</b></div>
+      )}
+      {role === "insider" && folName && <div className="center" style={{ fontSize: 15 }}>あなたのフォロワーは <b style={{ color: "#7a2fa0", fontSize: 18 }}>{folName}</b></div>}
+    </>
+  );
+
+  // ════ 役職配り ════
+  if (screen === "reveal") return (
+    <Shell>
+      {hdr}
+      {!roleRevealed ? (
+        <div className="center" style={{ paddingTop: 24 }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}><OwlDoc size={96} bob expr="surprised" /></div>
+          <div className="mp-title" style={{ fontSize: 24 }}>{myName} へ</div>
+          <div className="mp-lead" style={{ margin: "12px 0 26px" }}>役職をくばるてこ。<br />まわりに見られないようにてこ！</div>
+          <button className="btn btn-red" onClick={() => { setRoleRevealed(true); sfxReveal(); buzz(60); }}><Icon name="eye" size={24} />開封する</button>
+        </div>
+      ) : (
+        <div className="flip">
+          <div className="center" style={{ display: "flex", justifyContent: "center", margin: "8px 0 6px" }}><RoleChar role={role} size={96} /></div>
+          <div className="mp-title" style={{ fontSize: 32, color: GLOW[role] }}>{R.name}</div>
+          <div className="mp-lead" style={{ margin: "6px 0 16px" }}>{R.desc}</div>
+          <Panel head="お題">
+            <div className="center" style={{ fontSize: knowsWord ? 32 : 17, color: knowsWord ? "#c62828" : "#666", padding: "4px 0" }}>
+              {knowsWord ? `「${word}」` : "あなたはお題を知らない役てこ"}
             </div>
             {(role === "follower" || role === "villager") && insName && (
-              <div className="mp-panel" style={{ padding: 12, border: `5px solid ${roleMeta.color}`, marginTop: -2 }}>
-                <span style={{ fontSize: 10, color: "#888" }}>{role === "villager" ? "インサイダーは…　" : "味方のインサイダーは…　"}</span>
-                <span style={{ fontSize: 18, color: roleMeta.color, WebkitTextStroke: "0.4px #000" }}>{insName}</span>
-              </div>
+              <div className="center" style={{ marginTop: 8, fontSize: 16 }}>{role === "villager" ? "インサイダーは" : "味方のインサイダーは"} <b style={{ color: "#c62828", fontSize: 20 }}>{insName}</b></div>
             )}
-            {role === "insider" && folName && (
-              <div className="mp-panel" style={{ padding: 12, border: "5px solid #a020e0", marginTop: -2 }}>
-                <span style={{ fontSize: 10, color: "#888" }}>あなたのフォロワーは…　</span>
-                <span style={{ fontSize: 18, color: "#a020e0", WebkitTextStroke: "0.4px #000" }}>{folName}</span>
-              </div>
-            )}
-            {magic && myCard && (
-              <div className="mp-panel" style={{ padding: 12, border: "5px solid #5b8def", marginTop: -2, background: "#eef4ff" }}>
-                <div style={{ fontSize: 10, color: "#888" }}>🪄 あなたの魔術カード</div>
-                <div style={{ fontSize: 20, color: "#5b8def", WebkitTextStroke: "0.4px #000" }}>{myCard.t}</div>
-                <div style={{ fontSize: 11, color: "#333" }}>{myCard.d}</div>
-              </div>
-            )}
-            <button className="mp-btn mp-green" onClick={() => setS("game")}>▶ 任務開始！</button>
-          </div>
-        )}
-      </Shell>
-    );
-  }
+            {role === "insider" && folName && <div className="center" style={{ marginTop: 8, fontSize: 16 }}>あなたのフォロワーは <b style={{ color: "#7a2fa0", fontSize: 20 }}>{folName}</b></div>}
+          </Panel>
+          {magic && myCard && (
+            <Panel head="あなたの魔術カード" icon="wand" style={{ borderColor: "#5b8def" }}>
+              <div className="center" style={{ fontSize: 22, color: "#2f5fc4" }}>{myCard.t}</div>
+              <div className="center" style={{ fontSize: 15, marginTop: 4 }}>{myCard.d}</div>
+            </Panel>
+          )}
+          <button className="btn btn-gold" onClick={() => setS("game")}><Icon name="check" size={24} />おぼえた！ スタート</button>
+          <div className="mp-lead" style={{ fontSize: 13, color: "#bbb" }}>ここからは、押しているあいだだけ表示するてこ</div>
+        </div>
+      )}
+    </Shell>
+  );
 
-  // ════ GAME ════
+  // ════ ゲーム（質問タイム）════
   if (screen === "game") {
     const qa = room?.qa || [];
-    const pending = qa.length > 0 && isUnanswered(qa[qa.length - 1]);
-    const word = dec(room?.wordEnc || "");
-    const roleLabel = { master: "マスター", wizard: "魔術師", insider: "インサイダー", common: "コモン", villager: "村人", follower: "フォロワー" }[role];
-    const roleColor = { master: "#D4AF37", wizard: "#5b8def", insider: "#E53935", common: "#D4AF37", villager: "#5b8def", follower: "#a020e0" }[role];
+    const lastI = qa.length - 1;
+    const pending = lastI >= 0 && isUnanswered(qa[lastI]) ? qa[lastI] : null;
     return (
       <Shell>
-        <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12 }}>
-          <div className="mp-row">
-            <span style={{ fontSize: 11, color: roleColor, WebkitTextStroke: "0.3px #000" }}>{roleLabel}</span>
-            <span style={{ fontSize: 30, color: timeLeft < 60 ? "#E53935" : "#111", WebkitTextStroke: "1px #000" }}>{fmt(timeLeft)}</span>
-            <span style={{ fontSize: 10, color: "#888" }}>{optsSummary(room)}</span>
-          </div>
-        </div>
-
-        {knowsWord && (
-          <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12, background: "#fff8dc" }}>
-            <span style={{ fontSize: 10, color: "#888" }}>お題　</span>
-            <span style={{ fontSize: 18, color: roleColor, WebkitTextStroke: "0.4px #000" }}>「{word}」</span>
-          </div>
-        )}
+        {hdr}
+        <TimerBar left={left} total={room?.duration || 300} keeper={isMaster} labelL="のこり時間" labelR={optsSummary(room)} />
+        <Secret>{roleCard}</Secret>
         {magic && myCard && (
-          <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12, background: "#eef4ff", borderColor: "#5b8def" }}>
-            <span style={{ fontSize: 10, color: "#888" }}>🪄 魔術カード　</span>
-            <span style={{ fontSize: 14, color: "#5b8def", WebkitTextStroke: "0.3px #000" }}>{myCard.t}</span>
-            <span style={{ fontSize: 10, color: "#333" }}>　{myCard.d}</span>
+          <div className="note-bar note-dark" style={{ justifyContent: "flex-start", textAlign: "left" }}>
+            <Icon name="wand" size={24} /><span><b>魔術カード「{myCard.t}」</b><br />{myCard.d}</span>
           </div>
         )}
-        {magic && role === "villager" && insName && (
-          <div style={{ fontSize: 10, color: "#bbb", textAlign: "center", marginBottom: 8, textShadow: "1px 1px 0 #000" }}>インサイダーは {insName}。魔術師にバレないようにかばうてこ</div>
-        )}
 
-        <div className="mp-panel" style={{ maxHeight: 300, overflowY: "auto" }}>
-          <div className="mp-panel-head">★ しつもん記録 {qa.length}件 ★</div>
-          {qa.length === 0 && <div style={{ color: "#666", fontSize: 13, textAlign: "center", padding: "16px 0" }}>さいしょの質問を待ってるてこ</div>}
-          {qa.map((item, i) => (
-            <div key={item.id || i} style={{ padding: "9px 0", borderBottom: "2px dashed #ddd" }}>
-              <div style={{ fontSize: 10, color: "#888", marginBottom: 2 }}>{item.by}</div>
-              <div style={{ fontSize: 14, color: "#111", marginBottom: 6 }}>{item.q}</div>
-              {isUnanswered(item) ? (
-                isMaster ? (
-                  <div style={{ display: "flex", gap: 6 }}>
-                    {[["YES", "mp-green"], ["NO", "mp-red"], ["？", "mp-blue"]].map(([a, cls]) => (
-                      <button key={a} className={`mp-btn ${cls}`} style={{ flex: 1, marginBottom: 0, padding: "8px 0", fontSize: 13 }} onClick={() => doAnswer(a)}>{a}</button>
-                    ))}
-                  </div>
-                ) : <div style={{ fontSize: 12, color: "#888" }}>回答待ち…</div>
-              ) : (
-                <div style={{ fontSize: 16, color: item.ans === "YES" ? "#D4AF37" : item.ans === "NO" ? "#E53935" : "#888" }}>― {item.ans}</div>
-              )}
+        {isMaster && pending && (
+          <Panel head={`${pending.by} の質問`} icon="question" className="pop">
+            <div className="center" style={{ fontSize: 20, margin: "2px 0 12px", lineHeight: 1.5 }}>{pending.q}</div>
+            <div className="btn-row" style={{ marginBottom: 0 }}>
+              <button className="btn btn-gold" onClick={() => doAnswer(lastI, "YES")}>YES</button>
+              <button className="btn btn-red" onClick={() => doAnswer(lastI, "NO")}>NO</button>
+              <button className="btn btn-dark" onClick={() => doAnswer(lastI, "？")} style={{ fontSize: 14, padding: "10px 4px" }}>わからない</button>
+            </div>
+          </Panel>
+        )}
+        {isMaster && (
+          <>
+            <button className="btn btn-gold" onClick={doWordGuessed}><Icon name="check" size={24} />お題的中！ → {magic ? "インサイダーを指名" : "投票へ"}</button>
+            <div className="btn-row">
+              <button className="btn btn-cream btn-sm" onClick={doExtend}><Icon name="clock" size={24} />1分のばす</button>
+              {left === 0 && <button className="btn btn-red btn-sm" onClick={doTimeUp}><Icon name="hourglass" size={24} />時間切れで終了</button>}
+            </div>
+          </>
+        )}
+        {!isMaster && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <input className="mp-input" style={{ marginBottom: 0, flex: 1 }} placeholder={pending ? "回答待ち…" : "質問を書く（例：食べられる？）"}
+              value={qInput} maxLength={60} enterKeyHint="send" onChange={(e) => setQInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !pending) doAsk(); }} disabled={!!pending} />
+            <button className="btn btn-gold btn-sm" style={{ width: "auto", padding: "0 16px", marginBottom: 0 }} onClick={doAsk} disabled={!!pending || !qInput.trim()}>送る</button>
+          </div>
+        )}
+        {!isMaster && left === 0 && <div className="note-bar note-red"><Icon name="hourglass" size={24} />時間切れ！ {magic ? "魔術師" : "マスター"}の判定を待つてこ</div>}
+
+        <Panel head={`しつもん記録 ${qa.length}件`} icon="memo">
+          {qa.length === 0 && <div className="panel-note center">口で質問してもOK。ここに書くと記録が残るてこ</div>}
+          {[...qa].map((item, i) => ({ item, i })).reverse().map(({ item, i }) => (
+            <div key={item.id || i} style={{ padding: "8px 0", borderBottom: "2px dashed #d9d2bf", display: "flex", gap: 10, alignItems: "center" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="small">{item.by}</div>
+                <div style={{ fontSize: 16, lineHeight: 1.5 }}>{item.q}</div>
+              </div>
+              {isUnanswered(item)
+                ? <span className="chip chip-zero">回答待ち</span>
+                : <span className={`chip ${item.ans === "YES" ? "chip-plus" : item.ans === "NO" ? "chip-minus" : "chip-zero"}`}>{item.ans === "？" ? "わからない" : item.ans}</span>}
             </div>
           ))}
-        </div>
+        </Panel>
 
-        {!isMaster && (
-          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <input className="mp-input" style={{ marginBottom: 0, flex: 1 }} placeholder="しつもんする（例：食べられる？）"
-              value={qInput} onChange={(e) => setQInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !pending && doAsk()} disabled={pending} />
-            <button className="mp-btn mp-green" style={{ width: "auto", padding: "0 18px", marginBottom: 0 }} onClick={doAsk} disabled={pending}>送信</button>
-          </div>
-        )}
-
-        {isMaster && <>
-          <button className="mp-btn mp-green" onClick={doWordGuessed}>{magic ? "✓ お題的中 → インサイダーを指名へ" : "✓ お題的中 → 投票へ"}</button>
-          <button className="mp-btn mp-yellow" onClick={doExtend}>⏱ 1分 延長する</button>
-          {timeLeft === 0 && <button className="mp-btn mp-red" onClick={doTimeUp}>⏰ 時間切れ → 結果へ</button>}
-        </>}
-        {!isMaster && timeLeft === 0 && (
-          <div style={{ textAlign: "center", color: "#fff", background: "#E53935", border: "2px solid #000", borderRadius: 8, fontSize: 12, padding: 8, marginBottom: 8 }}>時間切れ。{magic ? "魔術師" : "マスター"}の操作を待つてこ</div>
-        )}
-        {isHost && !isMaster && (
-          <div style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 10, color: "#fff", textShadow: "1px 1px 0 #000", textAlign: "center", marginBottom: 4 }}>主催者の強制進行（{magic ? "魔術師" : "マスター"}が反応しない時）</div>
-            <button className="mp-btn mp-red" onClick={doWordGuessed}>⏩ 強制で投票へ</button>
-            <button className="mp-btn mp-red" onClick={doTimeUp}>⏩ 強制で結果へ（時間切れ扱い）</button>
-          </div>
+        {isHost && (
+          <HostMenu note={isMaster ? "困ったときだけ使う" : `${magic ? "魔術師" : "マスター"}の電波が切れた・反応しない時だけ使う`}>
+            {!isMaster && <button className="btn btn-red btn-sm" onClick={doWordGuessed}>強制で投票へ（お題的中あつかい）</button>}
+            {!isMaster && <button className="btn btn-red btn-sm" onClick={() => { if (window.confirm("時間切れで終わらせる？（点数が入る）")) doTimeUp(); }}>強制で時間切れ</button>}
+            <button className="btn btn-dark btn-sm" onClick={doAbort}>ラウンド中止（点数なし・ロビーへ）</button>
+          </HostMenu>
         )}
       </Shell>
     );
   }
 
-  // ════ VOTE ════
+  // ════ 投票 ════
   if (screen === "vote") {
-    const votable = (room?.players || []).filter((p) => p.id !== room?.masterId && p.id !== myId);
-    const voteCount = Object.keys(room?.votes || {}).length;
-    const totalVoters = magic ? 1 : (room?.players || []).length; // 通常はマスター含め全員／マジカルは魔術師のみ
-    const myVote = room?.votes?.[myId];
+    const votes = room?.votes || {};
+    const votable = players.filter((p) => p.id !== room?.masterId && p.id !== myId);
+    const voters = magic ? players.filter((p) => p.id === room?.masterId) : players;
+    const voteCount = voters.filter((p) => votes[p.id]).length;
+    const waiting = voters.filter((p) => !votes[p.id]).map((p) => p.name);
+    const myVote = votes[myId];
+    const nameOf = (id) => (id === NONE_ID ? "インサイダーはいない" : players.find((p) => p.id === id)?.name || "?");
     return (
       <Shell>
-        <div style={{ textAlign: "center", padding: "30px 0 22px" }}>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}><OwlDoc size={70} bob expr="suspicious" /></div>
-          <div className="mp-title" style={{ fontSize: 22 }}>お題は暴かれた！</div>
-          <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>
-            {magic ? "魔術師よ、インサイダーを見破れ！" : "潜入者は誰だ。一斉投票せよ！"}
-          </div>
-          <div style={{ fontSize: 11, marginTop: 8, letterSpacing: 2, textShadow: "1px 1px 0 #000" }}>{voteCount} / {totalVoters} 票</div>
+        {hdr}
+        <div className="center" style={{ paddingTop: 4 }}>
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}><OwlDoc size={72} bob expr="suspicious" /></div>
+          <div className="mp-title" style={{ fontSize: 26 }}>お題は暴かれた！</div>
+          <div className="mp-lead" style={{ margin: "6px 0 14px" }}>{magic ? "魔術師よ、インサイダーを見破れ！" : "インサイダーは誰だ？ 全員で投票！"}</div>
         </div>
+        <div className="note-bar note-dark"><Icon name="people" size={24} />{voteCount} / {voters.length} 人が投票{waiting.length > 0 && voteCount > 0 ? `（まだ：${waiting.join("・")}）` : ""}</div>
+
         {magic && !isMaster ? (
-          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>🧙 魔術師が推理中…<br /><span style={{ fontSize: 11 }}>ポーカーフェイスで待つてこ</span></div>
+          <Panel><div className="center" style={{ padding: 10 }}><div style={{ display: "flex", justifyContent: "center" }}><Icon name="wizard" size={48} /></div><div style={{ fontSize: 17, marginTop: 8 }}>魔術師が推理中…</div><div className="panel-note">ポーカーフェイスで待つてこ</div></div></Panel>
         ) : myVote ? (
-          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>✓ 投票完了。開票を待つてこ</div>
+          <Panel><div className="center" style={{ padding: 8 }}><div className="small">あなたの投票</div><div style={{ fontSize: 22, margin: "4px 0" }}>{nameOf(myVote)}</div><div className="panel-note">開票を待つてこ</div></div></Panel>
         ) : (
-          <div className="mp-panel">
-            <div className="mp-panel-head">★ インサイダーは誰だ？ ★</div>
+          <Panel head={magic ? "インサイダーを指名" : "インサイダーは誰だ？"} icon="mask">
             {votable.map((p) => (
-              <button key={p.id} className="mp-btn mp-blue" onClick={() => doVote(p.id)}>{p.name}</button>
+              <button key={p.id} className={`btn btn-sm ${pick === p.id ? "btn-gold" : "btn-dark"}`} onClick={() => setPick(p.id)} aria-pressed={pick === p.id}>
+                {pick === p.id && <Icon name="check" size={24} />}{p.name}
+              </button>
             ))}
             {room?.peace && !magic && (
-              <button className="mp-btn mp-green" onClick={() => doVote(NONE_ID)}>✅ インサイダーはいない（平和村）</button>
+              <button className={`btn btn-sm ${pick === NONE_ID ? "btn-gold" : "btn-cream"}`} onClick={() => setPick(NONE_ID)}><Icon name="halo" size={24} />インサイダーはいない（平和村）</button>
             )}
-          </div>
+            <button className="btn btn-red" onClick={() => doVote(pick)} disabled={!pick} style={{ marginBottom: 0 }}>
+              {pick ? `「${nameOf(pick)}」に決定！` : "えらんでから決定してね"}
+            </button>
+          </Panel>
         )}
         {isHost && (
-          <button className="mp-btn mp-red" onClick={doForceFinalize} style={{ marginTop: 6 }}>
-            ⏩ 強制的に開票する（揃わない時用）
-          </button>
+          <HostMenu note="電波が悪くて票がそろわない時に使う">
+            <button className="btn btn-red btn-sm" onClick={doForceFinalize}>いまある票で開票する</button>
+            <button className="btn btn-dark btn-sm" onClick={doAbort}>ラウンド中止（点数なし・ロビーへ）</button>
+          </HostMenu>
         )}
       </Shell>
     );
   }
 
-  // ════ RESULT ════
+  // ════ 結果 ════
   if (screen === "result") {
     const isPeace = !!room?.isPeaceVillage;
     const insiderId = isPeace ? null : dec(room?.insiderEnc || "");
-    const insiderPlayer = room?.players?.find((p) => p.id === insiderId);
-    const word = dec(room?.wordEnc || "");
+    const insiderPlayer = players.find((p) => p.id === insiderId);
     const votes = room?.votes || {};
     const { vc } = topVote(votes);
     const oc = room?.outcome;
-    const titleMap = {
-      commons: "コモンの勝利！", insider: "インサイダーの勝利！", timeout: "時間切れ — 失敗…",
-      peace_win: "平和村 — 村の勝利！", peace_lose: "平和村 — 村の失敗…", peace_timeout: "時間切れ — 失敗…",
-      magic_village: "村人チームの勝利！", magic_wizard: "魔術師の勝利！", magic_timeout: "時間切れ — 魔術師の勝利…",
+    const TITLES = {
+      commons: "コモンの勝利！", insider: "インサイダーの勝利！", timeout: "時間切れ…",
+      peace_win: "平和村 ― 村の勝利！", peace_lose: "平和村 ― 見抜けず…", peace_timeout: "時間切れ…",
+      magic_village: "村人チームの勝利！", magic_wizard: "魔術師の勝利！", magic_timeout: "時間切れ ― 魔術師の勝ち",
     };
-    const title = titleMap[oc] || "結果";
-    const tcol = ["commons", "peace_win", "magic_village"].includes(oc) ? "#D4AF37" : "#E53935";
-    const flair = computeFlair(room?.players || [], lb);
+    const good = ["commons", "peace_win", "magic_village"].includes(oc);
+    const nameOf = (id) => (id === NONE_ID ? "いない" : players.find((p) => p.id === id)?.name || "?");
+    const markOf = (p) => (p.id === insiderId ? "mask" : p.id === room?.masterId ? (magic ? "wizard" : "mic") : (room?.followerEnc && dec(room.followerEnc) === p.id ? "ninja" : null));
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1} 結果`} onBack={backHome} />
-        <div style={{ textAlign: "center", padding: "10px 0 18px" }}>
-          <div className="mp-title" style={{ fontSize: 24, color: tcol }}>{title}</div>
-          <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>
-            お題　<span style={{ fontSize: 18, color: "#FFD700", WebkitTextStroke: "0.4px #000" }}>「{word}」</span>
+        <Header title={magic ? "マジカル" : "インサイダー"} icon={magic ? "wand" : "eye"} sub={`ROUND ${room?.round || 1} 結果`} onHome={goHome} />
+        <div className="center pop">
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}>
+            {oc?.includes("timeout") ? <Icon name="hourglass" size={72} /> : <OwlDoc size={72} bob expr={good ? "happy" : "surprised"} />}
           </div>
+          <div className="mp-title" style={{ fontSize: 28, color: good ? "#D4AF37" : "#ff6b5e" }}>{TITLES[oc] || "結果"}</div>
         </div>
+        <div className="mp-lead rise" style={{ animationDelay: ".25s", margin: "6px 0 14px" }}>お題 <span style={{ fontSize: 22, color: "#FFD700" }}>「{dec(room?.wordEnc || "")}」</span></div>
 
         {isPeace ? (
-          <div className="mp-panel" style={{ textAlign: "center", border: "5px solid #D4AF37" }}>
-            <div className="mp-panel-head" style={{ background: "#D4AF37" }}>このラウンドは…</div>
-            <div style={{ fontSize: 22, color: "#D4AF37", WebkitTextStroke: "0.5px #000" }}>平和村 😇</div>
-            <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>インサイダーはいなかった</div>
-          </div>
+          <Panel head="このラウンドは…" className="pop" style={{ animationDelay: ".5s" }}>
+            <div className="center" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}><Icon name="halo" size={48} /><span style={{ fontSize: 24 }}>平和村</span></div>
+            <div className="panel-note center" style={{ marginTop: 6 }}>インサイダーはいなかった！</div>
+          </Panel>
         ) : (
-          <div className="mp-panel" style={{ textAlign: "center", border: "5px solid #E53935" }}>
-            <div className="mp-panel-head">インサイダーの正体は…</div>
-            <div className="mp-row" style={{ justifyContent: "center", gap: 10 }}>
-              <OwlDoc size={40} />
-              <span style={{ fontSize: 24, color: "#E53935", WebkitTextStroke: "0.5px #000" }}>{insiderPlayer?.name || "?"}</span>
+          <Panel head="インサイダーの正体は…" className="pop" style={{ animationDelay: ".5s", borderColor: "#E53935" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12 }}>
+              <RoleChar role="insider" size={48} />
+              <span style={{ fontSize: 28, color: "#c62828" }}>{insiderPlayer?.name || "?"}</span>
             </div>
-            {magic && oc !== "magic_timeout" && (
-              <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
-                魔術師の指名 → <b>{room?.players?.find((p) => p.id === votes[room.masterId])?.name || "（なし）"}</b>
-              </div>
-            )}
-          </div>
+            {magic && oc !== "magic_timeout" && <div className="panel-note center" style={{ marginTop: 8 }}>魔術師の指名 → <b>{nameOf(votes[room?.masterId])}</b></div>}
+          </Panel>
         )}
 
-        <ScoreRows players={room?.players || []} scores={room?.scores} myId={myId} flair={flair}
-          colorOf={(p) => (!isPeace && p.id === insiderId) ? "#E53935" : p.id === room.masterId ? (magic ? "#5b8def" : "#D4AF37") : "#111"}
-          extra={(p) => vc[p.id] ? <span style={{ fontSize: 10, color: "#888" }}>　{vc[p.id]}票</span> : null} />
+        <Panel head="とくてん（このラウンド／合計）" icon="star">
+          <PlayerRows players={players} scores={room?.scores} delta={room?.lastDelta || {}} myId={myId} mark={markOf} animate
+            nameColor={(p) => (p.id === insiderId ? "#c62828" : undefined)}
+            note={(p) => (vc[p.id] ? <span className="prow-note">{vc[p.id]}票</span> : null)} />
+        </Panel>
 
         {Object.keys(votes).length > 0 && !magic && (
-          <div className="mp-panel">
-            <div className="mp-panel-head" style={{ background: "#D4AF37" }}>★ だれが だれに ★</div>
-            {(room?.players || []).filter((p) => votes[p.id]).map((p) => {
-              const tgt = votes[p.id];
-              const tName = tgt === NONE_ID ? "インサイダーなし" : (room?.players?.find((q) => q.id === tgt)?.name || "?");
-              return (
-                <div key={p.id} style={{ fontSize: 12, padding: "5px 2px", color: "#111" }}>
-                  {p.name} <span style={{ color: "#E53935" }}>→</span> {tName}
+          <Panel head="だれが だれに" icon="people">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px" }}>
+              {players.filter((p) => votes[p.id]).map((p) => (
+                <div key={p.id} style={{ fontSize: 15, padding: "3px 0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {p.name} <span style={{ color: "#c62828" }}>→</span> <b style={{ color: votes[p.id] === insiderId ? "#1f7a4c" : "#1a1a1a" }}>{nameOf(votes[p.id])}</b>
                 </div>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          </Panel>
         )}
 
-        {isHost ? (
-          <button className="mp-btn mp-green" onClick={doNextRound}>▶ 同じメンバーで次のラウンド</button>
-        ) : (
-          <div style={{ textAlign: "center", color: "#fff", fontSize: 12, marginBottom: 10, textShadow: "1px 1px 0 #000" }}>🏠 部屋主が次のラウンドを始められるてこ</div>
-        )}
-        <button className="mp-btn mp-blue" onClick={openLb}>★ つうさんせいせき</button>
-        <button className="mp-btn mp-yellow" onClick={doReset}>🚪 解散する</button>
+        {isHost
+          ? <button className="btn btn-gold" onClick={doNextRound}><Icon name="arrowR" size={24} />次のラウンドへ（ロビー）</button>
+          : <div className="note-bar note-dark">部屋主が次のラウンドを始めるてこ</div>}
+        <div className="btn-row">
+          <button className="btn btn-dark btn-sm" onClick={() => openOverlay("lb")}><Icon name="trophy" size={24} />せいせき</button>
+          <button className="btn btn-cream btn-sm" onClick={goHome}><Icon name="door" size={24} />ホームへ</button>
+        </div>
       </Shell>
     );
   }
 
-  return <Shell><div style={{ textAlign: "center", paddingTop: 48 }}>…</div></Shell>;
+  return <Shell><div className="center" style={{ paddingTop: 48 }}>…</div></Shell>;
 }

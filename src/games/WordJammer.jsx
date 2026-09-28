@@ -1,84 +1,74 @@
 // ワードジャマー：出題者「ダスモン」が質問に本当の答えを書く。妨害者「ジャマー」がそれを見て嘘を2つ混ぜる。
-// 解答者「ワカルン」たちは3つの答えと会話・表情から本物を見抜く。役は毎ラウンド時計回りに交代。
+// 解答者「ワカルン」たちは3つの答えと会話・表情から本物を見抜く。役は毎ラウンドじゅんぐりに交代。
 import { useState, useEffect } from "react";
-import { setRoomField } from "../lib/db";
-import { pickJammerQuestion } from "../lib/words";
-import { applyLeaderboard, addScores } from "../lib/scoring";
-import { ROOM, computeFlair, shuffle, scorerOf, TAKEOVER_MS, OwlDoc, Bubble, Shell, Header, ErrBox, ScoreRows, ModeCard } from "../ui";
+import { updateRoom, setRoomField, transactRoom } from "../lib/db";
+import { finalizeRound } from "../lib/scoring";
+import { startJammerRound } from "../lib/rounds";
+import { ROOM, enc, dec, computeFlair, shuffle, scorerOf, TAKEOVER_MS } from "../lib/util";
+import { jammerRoles, scoreJammer } from "../lib/rules";
+import { buzz } from "../lib/hooks";
+import { sfxVote } from "../lib/sound";
+import { Icon } from "../icons";
+import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, HostMenu } from "../ui";
 
-const JAM_COLOR = "#3cb371";
-// 答えの文字列は Firebase に平文で置かない（他人の端末から DevTools で覗けるため軽く難読化）
-const enc = (t) => { try { return btoa(unescape(encodeURIComponent(t))); } catch { return btoa(t); } };
-const dec = (s) => { try { return decodeURIComponent(escape(atob(s))); } catch { return ""; } };
+const ABC = ["A", "B", "C"];
+const Letter = ({ i, on }) => (
+  <span style={{ flex: "0 0 auto", width: 32, height: 32, lineHeight: "28px", textAlign: "center", fontSize: 18, border: "2px solid #000", borderRadius: 8,
+    background: on ? "#1a1a1a" : "#D4AF37", color: on ? "#D4AF37" : "#1a1200" }}>{ABC[i]}</span>
+);
 
-// ── ラウンド開始／リセット（App から呼ばれる純関数）──
-export function startJammerRound(room) {
-  const players = room.players || [];
-  const n = players.length;
-  const dIdx = ((room.round || 1) - 1) % n;
-  const dasmon = players[dIdx];
-  const jammer = players[(dIdx + 1) % n];
-  const card = pickJammerQuestion(room.usedQuestions || [], !!room.adult);
-  return {
-    ...room,
-    phase: "playing", votes: {}, scored: false, outcome: null,
-    usedQuestions: [...(room.usedQuestions || []), card.q],
-    jam: { dasmonId: dasmon.id, jammerId: jammer.id, q: card.q, pts: card.pts, step: "answer",
-      answerEnc: null, fakesEnc: null, order: null, picks: {} },
-  };
-}
-export function resetJammerRound(room) { return { ...room, jam: null }; }
-
-// ── ロビー内の設定パネル ──
-export function JammerSettings({ room, isHost, save, onStart, err }) {
-  const players = room?.players || [];
-  const n = players.length;
-  const dIdx = n ? ((room.round || 1) - 1) % n : 0;
-  const dasmon = players[dIdx]?.name || "?";
-  const jammer = players[(dIdx + 1) % (n || 1)]?.name || "?";
+// ── ロビー内の設定 ──
+export function JammerSettings({ room, isHost, onStart, err }) {
+  const n = (room?.players || []).length;
+  const { dasmon, jammer } = jammerRoles(room);
   return (
     <>
-      <div className="mp-panel" style={{ textAlign: "center", padding: 10 }}>
-        <span style={{ fontSize: 10, color: "#888" }}>今回の役（毎ラウンド じゅんぐり）</span>
-        <div style={{ fontSize: 14, color: "#111", lineHeight: 1.8 }}>
-          🎙 ダスモン（出題者）：<b style={{ color: JAM_COLOR }}>{dasmon}</b><br />
-          😈 ジャマー（妨害者）：<b style={{ color: "#E53935" }}>{jammer}</b><br />
-          🔍 ワカルン（解答者）：そのほか全員
-        </div>
-      </div>
+      <Panel head="今回の役（毎ラウンド じゅんぐり）" icon="loop">
+        {[["dasmon", dasmon?.name], ["jammer", jammer?.name], ["wakarun", "そのほか全員"]].map(([r, who]) => (
+          <div key={r} className="prow">
+            <RoleChar role={r} size={36} bob={false} badge={false} />
+            <span className="prow-nm" style={{ fontSize: 15 }}>{{ dasmon: "ダスモン（答える人）", jammer: "ジャマー（嘘を混ぜる人）", wakarun: "ワカルン（見抜く人）" }[r]}</span>
+            <b style={{ fontSize: 16 }}>{who || "?"}</b>
+          </div>
+        ))}
+      </Panel>
       {isHost && (
-        <div className="mp-panel">
-          <div className="mp-panel-head">★ ワードジャマー設定（部屋主） ★</div>
-          <ModeCard on={!!room.adult} color="#a020e0" emoji="🌶️" label="アダルト🔞" desc="きわどい質問カードも混ざる…完全身内専用" toggle
-            onClick={() => save({ ...room, adult: !room.adult })} />
-        </div>
+        <Panel head="ワードジャマー設定（部屋主）" icon="key">
+          <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="きわどい質問カードも混ざる…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
+        </Panel>
       )}
       {isHost ? (
         <>
-          <button className="mp-btn mp-red" onClick={onStart} disabled={n < 3}>{n < 3 ? `あと${3 - n}名` : "▶ ワードジャマー スタート！"}</button>
+          <button className="btn btn-red" onClick={onStart} disabled={n < 3}><Icon name="arrowR" size={24} />{n < 3 ? `あと${3 - n}人` : "ワードジャマー スタート！"}</button>
           <ErrBox>{err}</ErrBox>
         </>
       ) : (
-        <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 12, padding: 18 }}>部屋主がスタートするのを待つてこ</div>
+        <div className="note-bar note-dark"><Icon name="memo" size={24} />部屋主のスタートを待つてこ</div>
       )}
-      <div className="mp-panel">
-        <div className="mp-panel-head" style={{ background: JAM_COLOR, color: "#fff" }}>★ ワードジャマーのルール ★</div>
-        <div style={{ fontSize: 11, lineHeight: 1.85, color: "#1a1a1a" }}>
-          <div>1. <b>ダスモン</b>に質問カード（例：子どもの頃なりたかった職業は？）。ダスモンは<b>本当の答え</b>をこっそり入力</div>
-          <div>2. <b>ジャマー</b>だけが本当の答えを見て、それっぽい<b>嘘の答えを2つ</b>入力</div>
-          <div>3. 3つの答えがシャッフルされて全員に表示。<b>ワカルン</b>はダスモンと話しながら、どれが本物か選ぶ（ダスモンは嘘をついてもOK・ジャマーも口出しOK）</div>
-          <div>4. 得点：正解したワカルン <b style={{ color: JAM_COLOR }}>+難易度pt（1〜3）</b>／外したワカルン1人につき ジャマー <b style={{ color: "#E53935" }}>+1</b>／ワカルンの半分以上が正解ならダスモン <b>+1</b></div>
+      <Panel head="ワードジャマーのルール" icon="memo" headStyle={{ background: "linear-gradient(180deg,#8fe0b0,#3cb371)" }}>
+        <div className="gd-grid">
+          {[
+            ["ダスモンが質問カードに本当の答えを書く（例：子どもの頃なりたかった職業は？）", null],
+            ["ジャマーだけが本当の答えを見て、それっぽい嘘を2つ書く", null],
+            ["3つが混ざって全員に出る。ワカルンはダスモンと話して本物を選ぶ", null],
+            ["見抜いたワカルン", "+難易度（1〜3）"],
+            ["だまされたワカルン1人につき ジャマー", "+1"],
+            ["ワカルンの半分以上が見抜いたら ダスモン", "+1"],
+          ].map(([t, p], i) => (
+            <div key={i} className="gd-pt">{i < 3 && <div className="gd-num" style={{ width: 32, flex: "0 0 32px" }}>{i + 1}</div>}<div className="gd-pt-t">{t}</div>{p && <span className="chip chip-plus">{p}</span>}</div>
+          ))}
         </div>
-      </div>
+      </Panel>
     </>
   );
 }
 
 // ── ゲーム本体（phase: playing[step: answer → fake → pick] → result）──
-export function JammerGame({ room, myId, isHost, save, lb, onNextRound, onLeave, openLb }) {
+export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRound, openLb }) {
   const [ans, setAns] = useState("");
   const [f1, setF1] = useState("");
   const [f2, setF2] = useState("");
+  const [sel, setSel] = useState(null);
   const jam = room?.jam || {};
   const players = room?.players || [];
   const nameOf = (id) => players.find((p) => p.id === id)?.name || "?";
@@ -86,188 +76,171 @@ export function JammerGame({ room, myId, isHost, save, lb, onNextRound, onLeave,
   const amJammer = jam.jammerId === myId;
   const wakarun = players.filter((p) => p.id !== jam.dasmonId && p.id !== jam.jammerId);
   const amWakarun = wakarun.some((p) => p.id === myId);
+  const myRole = amDasmon ? "dasmon" : amJammer ? "jammer" : "wakarun";
   const truth = dec(jam.answerEnc || "");
   const fakes = (jam.fakesEnc || []).map(dec);
-  // order: 表示順（0=本物, 1・2=嘘）を保存しておく
-  const options = (jam.order || []).map((k) => (k === 0 ? truth : fakes[k - 1]));
+  const order = jam.order || [];
+  const options = order.map((k) => (k === 0 ? truth : fakes[k - 1]));
+  const picks = jam.picks || {};
+  const hdr = (sub) => <Header title="ワードジャマー" icon="memo" sub={sub || `ROUND ${room?.round || 1}`} onHome={onHome} />;
 
-  const submitAnswer = async () => {
+  const submitAnswer = () => {
     if (!ans.trim()) return;
-    await save({ ...room, jam: { ...jam, answerEnc: enc(ans.trim()), step: "fake" } });
+    updateRoom(ROOM, { "jam/answerEnc": enc(ans.trim().slice(0, 20)), "jam/step": "fake" });
   };
-  const submitFakes = async () => {
+  const submitFakes = () => {
     if (!f1.trim() || !f2.trim()) return;
-    await save({ ...room, jam: { ...jam, fakesEnc: [enc(f1.trim()), enc(f2.trim())], order: shuffle([0, 1, 2]), step: "pick" } });
+    updateRoom(ROOM, { "jam/fakesEnc": [enc(f1.trim().slice(0, 20)), enc(f2.trim().slice(0, 20))], "jam/order": shuffle([0, 1, 2]), "jam/step": "pick" });
+  };
+  const redraw = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" && cur.jam?.step !== "pick" ? startJammerRound(cur) : undefined));
+  const finalize = () => finalizeRound((cur) => (cur.jam?.step === "pick" ? scoreJammer(cur) : null));
+  const doPick = (idx) => {
+    if (!amWakarun || picks[myId] !== undefined || idx === null) return;
+    sfxVote(); buzz(40);
+    setRoomField(ROOM, `jam/picks/${myId}`, idx); // 自分の回答だけ書く
   };
 
-  const finalize = async (data) => {
-    if (data.scored) return;
-    const j = data.jam;
-    const delta = {}; const winners = [];
-    const add = (name, v) => { delta[name] = (delta[name] || 0) + v; };
-    const wk = data.players.filter((p) => p.id !== j.dasmonId && p.id !== j.jammerId);
-    let correct = 0;
-    wk.forEach((p) => {
-      const pick = j.picks?.[p.id];
-      if (pick === undefined) return; // 未回答は0
-      if (j.order[pick] === 0) { correct += 1; add(p.name, j.pts); winners.push(p.name); }
-      else add(nameOf(j.jammerId), 1);
-    });
-    if (wk.length > 0 && correct * 2 >= wk.length) { add(nameOf(j.dasmonId), 1); winners.push(nameOf(j.dasmonId)); }
-    if (correct < wk.length) winners.push(nameOf(j.jammerId));
-    await applyLeaderboard(data.players, delta, winners);
-    await save({ ...data, phase: "result", scores: addScores(data.scores, delta), scored: true, outcome: `${correct}/${wk.length}` });
-  };
-
-  const doPick = async (idx) => {
-    if (!amWakarun || jam.picks?.[myId] !== undefined) return;
-    // 自分の回答だけ書く（同時に選んだ人の回答を消さない）。採点は下の useEffect が担当。
-    await setRoomField(ROOM, `jam/picks/${myId}`, idx);
-  };
-
-  // 全員が選んだら採点する。採点役（部屋主）が担当し、寝ていれば他の端末が肩代わりする。
+  // 全員が選んだら採点（採点役がすぐ、寝ていれば他の端末が肩代わり。二重採点はトランザクションで防ぐ）
   useEffect(() => {
-    if (jam?.step !== "pick" || room?.scored) return;
-    if (Object.keys(jam?.picks || {}).length < wakarun.length) return;
-    const mine = scorerOf(room) === myId;
-    const id = setTimeout(() => { finalize(room); }, mine ? 0 : TAKEOVER_MS);
+    if (jam?.step !== "pick" || room?.scored) return undefined;
+    if (!wakarun.length || !wakarun.every((p) => (room?.jam?.picks || {})[p.id] !== undefined)) return undefined;
+    const id = setTimeout(() => { finalize().catch(() => {}); }, scorerOf(room) === myId ? 0 : TAKEOVER_MS);
     return () => clearTimeout(id);
-  }, [jam?.step, room, wakarun.length, myId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jam?.step, room, myId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const flair = computeFlair(players, lb);
   const roleBar = (label) => (
-    <div className="mp-panel" style={{ padding: "8px 12px", marginBottom: 12 }}>
-      <div className="mp-row">
-        <span style={{ fontSize: 11, color: JAM_COLOR, WebkitTextStroke: "0.3px #000" }}>{amDasmon ? "🎙 ダスモン" : amJammer ? "😈 ジャマー" : "🔍 ワカルン"}</span>
-        <span style={{ fontSize: 11, color: "#888" }}>{label}</span>
-        <span style={{ fontSize: 11, color: "#111" }}>難易度 {"★".repeat(jam.pts || 1)}</span>
-      </div>
+    <div className="note-bar note-dark" style={{ justifyContent: "space-between" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 6 }}><RoleChar role={myRole} size={36} bob={false} badge={false} />あなたは{{ dasmon: "ダスモン", jammer: "ジャマー", wakarun: "ワカルン" }[myRole]}</span>
+      <span style={{ fontSize: 13, color: "#ddd" }}>{label}</span>
     </div>
   );
   const qCard = (
-    <div className="mp-panel" style={{ textAlign: "center", padding: 16, borderColor: JAM_COLOR }}>
-      <div className="mp-panel-head" style={{ background: JAM_COLOR, color: "#fff" }}>🎙 {nameOf(jam.dasmonId)} への質問</div>
-      <div style={{ fontSize: 18, color: "#111", lineHeight: 1.5 }}>{jam.q}</div>
-    </div>
+    <Panel head={`${nameOf(jam.dasmonId)} への質問`} icon="pencil" headStyle={{ background: "linear-gradient(180deg,#8fe0b0,#3cb371)" }}>
+      <div className="center" style={{ fontSize: 21, lineHeight: 1.5, margin: "2px 0 6px" }}>{jam.q}</div>
+      <div className="center small">難易度 {"★".repeat(jam.pts || 1)}（見抜くと +{jam.pts || 1}）</div>
+    </Panel>
+  );
+  const hostTools = (
+    <HostMenu note="だれかの電波が切れて止まったときに使う">
+      {jam.step !== "pick" && <button className="btn btn-dark btn-sm" onClick={redraw}>質問を引き直す（同じ役のまま）</button>}
+      {jam.step === "pick" && <button className="btn btn-red btn-sm" onClick={finalize}>いまある回答で締め切る</button>}
+      <button className="btn btn-dark btn-sm" onClick={onAbort}>ラウンド中止（点数なし・次の人へ）</button>
+    </HostMenu>
   );
 
   if (room?.phase === "playing") {
-    // ── step 1: ダスモンが本当の答えを入力 ──
+    // ── 1. ダスモンが本当の答えを書く ──
     if (jam.step === "answer") return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1}`} title="てこみの ワードジャマー" />
-        {roleBar("ダスモンが回答中")}
+        {hdr()}
+        {roleBar("ダスモンが答えを書いてる")}
         {qCard}
         {amDasmon ? (
-          <div className="mp-panel">
-            <div className="mp-panel-head">★ 本当の答えを入力（ジャマーだけが見る） ★</div>
-            <input className="mp-input" placeholder="本当の答え（短く）" value={ans} onChange={(e) => setAns(e.target.value)} maxLength={20}
-              onKeyDown={(e) => e.key === "Enter" && submitAnswer()} />
-            <button className="mp-btn mp-green" onClick={submitAnswer} disabled={!ans.trim()}>✓ これで決定</button>
-          </div>
-        ) : (
-          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>🎙 {nameOf(jam.dasmonId)} が本当の答えを書いてるてこ…</div>
-        )}
-        <Bubble expr="thinking">{amDasmon ? "正直に書くてこ。あとで会話で嘘をついてもいいけど、答えは本物てこ！" : amJammer ? "次はキミの出番てこ。ダスモンの答えに寄せた嘘を2つ考えておくてこ😈" : "ダスモンの顔をよく見ておくてこ。答えが出たら会話で探るてこ🔍"}</Bubble>
+          <Panel head="本当の答え（ジャマーだけが見る）" icon="pencil">
+            <input className="mp-input" placeholder="本当の答え（20文字まで）" value={ans} maxLength={20} enterKeyHint="done"
+              onChange={(e) => setAns(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitAnswer(); }} />
+            <button className="btn btn-gold" onClick={submitAnswer} disabled={!ans.trim()} style={{ marginBottom: 0 }}><Icon name="check" size={24} />これで決定</button>
+          </Panel>
+        ) : <div className="note-bar note-dark"><Icon name="pencil" size={24} />{nameOf(jam.dasmonId)} が本当の答えを書いてるてこ…</div>}
+        <Bubble expr="thinking">{amDasmon ? "正直に書くてこ。あとで会話でとぼけてもいいけど、答えは本物てこ！" : amJammer ? "次はキミの番てこ。ダスモンに寄せた嘘を2つ考えておくてこ" : "ダスモンの顔をよく見ておくてこ。答えが出たら話して探るてこ"}</Bubble>
+        {isHost && hostTools}
       </Shell>
     );
 
-    // ── step 2: ジャマーが嘘を2つ入力 ──
+    // ── 2. ジャマーが嘘を2つ書く ──
     if (jam.step === "fake") return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1}`} title="てこみの ワードジャマー" />
-        {roleBar("ジャマーが妨害中")}
+        {hdr()}
+        {roleBar("ジャマーが嘘を仕込み中")}
         {qCard}
         {amJammer ? (
-          <div className="mp-panel">
-            <div className="mp-panel-head" style={{ background: "#E53935" }}>★ 本当の答えは… ★</div>
-            <div style={{ textAlign: "center", fontSize: 22, color: "#E53935", WebkitTextStroke: "0.4px #000", marginBottom: 12 }}>「{truth}」</div>
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 6 }}>それっぽい嘘の答えを2つ（表記のクセや長さも真似るてこ）</div>
-            <input className="mp-input" placeholder="嘘の答え①" value={f1} onChange={(e) => setF1(e.target.value)} maxLength={20} />
-            <input className="mp-input" placeholder="嘘の答え②" value={f2} onChange={(e) => setF2(e.target.value)} maxLength={20} />
-            <button className="mp-btn mp-red" onClick={submitFakes} disabled={!f1.trim() || !f2.trim()}>😈 混ぜ込む！</button>
-          </div>
-        ) : (
-          <div className="mp-panel" style={{ textAlign: "center", color: "#666", fontSize: 13, padding: 24 }}>😈 {nameOf(jam.jammerId)} が嘘を仕込んでるてこ…</div>
-        )}
-        {isHost && !amJammer && (
-          <button className="mp-btn mp-red" style={{ fontSize: 12 }} onClick={() => save(startJammerRound({ ...room, round: room.round }))}>⏩ ジャマーが反応しない → 質問を引き直す</button>
-        )}
+          <Panel head="本当の答えは…（まわりに見せない）" icon="devil" headStyle={{ background: "linear-gradient(180deg,#ff8a7e,#E53935)", color: "#fff" }}>
+            <div className="center" style={{ fontSize: 26, color: "#c62828", marginBottom: 10 }}>「{truth}」</div>
+            <div className="panel-note" style={{ marginBottom: 8 }}>それっぽい嘘を2つ。書き方のクセや長さも真似るてこ</div>
+            <input className="mp-input" placeholder="嘘の答え 1" value={f1} maxLength={20} onChange={(e) => setF1(e.target.value)} />
+            <input className="mp-input" placeholder="嘘の答え 2" value={f2} maxLength={20} onChange={(e) => setF2(e.target.value)} />
+            <button className="btn btn-red" onClick={submitFakes} disabled={!f1.trim() || !f2.trim()} style={{ marginBottom: 0 }}><Icon name="devil" size={24} />混ぜ込む！</button>
+          </Panel>
+        ) : <div className="note-bar note-dark"><Icon name="devil" size={24} />{nameOf(jam.jammerId)} が嘘を仕込んでるてこ…</div>}
+        {isHost && hostTools}
       </Shell>
     );
 
-    // ── step 3: ワカルンが選ぶ ──
-    const myPick = jam.picks?.[myId];
-    const cnt = Object.keys(jam.picks || {}).length;
+    // ── 3. ワカルンが選ぶ ──
+    const mine = picks[myId];
+    const cnt = wakarun.filter((p) => picks[p.id] !== undefined).length;
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1}`} title="てこみの ワードジャマー" />
+        {hdr()}
         {roleBar(`回答 ${cnt} / ${wakarun.length}`)}
         {qCard}
-        <div className="mp-panel">
-          <div className="mp-panel-head">★ 本物はどれ？ ★</div>
-          {options.map((o, i) => {
-            const mine = myPick === i;
-            const isTruth = (amDasmon || amJammer) && jam.order[i] === 0;
-            return (
-              <button key={i} className={`mp-btn ${mine ? "mp-green" : "mp-blue"}`} onClick={() => doPick(i)}
-                disabled={!amWakarun || myPick !== undefined} style={{ fontSize: 16, opacity: (!amWakarun || (myPick !== undefined && !mine)) ? 0.8 : 1 }}>
-                {["Ⓐ", "Ⓑ", "Ⓒ"][i]} {o}{isTruth ? "　★本物" : ""}{mine ? "　✓" : ""}
-              </button>
-            );
-          })}
-          {amWakarun && myPick === undefined && <div style={{ fontSize: 10, color: "#888", textAlign: "center" }}>ダスモンに話しかけて、表情や言い回しから見抜くてこ</div>}
-          {amWakarun && myPick !== undefined && <div style={{ fontSize: 12, color: "#666", textAlign: "center" }}>✓ 回答完了。みんなの回答を待つてこ</div>}
-          {(amDasmon || amJammer) && <div style={{ fontSize: 11, color: "#666", textAlign: "center" }}>{amDasmon ? "ワカルンの質問に答えるてこ。嘘をついてもOK（でもバレたら…）" : "ワカルンを惑わす口出しOKてこ😈"}</div>}
-        </div>
-        {isHost && <button className="mp-btn mp-red" style={{ fontSize: 12 }} onClick={() => finalize(room)}>⏩ 今ある回答で締め切る</button>}
-        {(amDasmon || amJammer) && (
-          <div className="mp-panel" style={{ padding: 10 }}>
-            <div style={{ fontSize: 10, color: "#888", marginBottom: 4 }}>回答状況</div>
-            {wakarun.map((p) => <div key={p.id} style={{ fontSize: 12, color: "#111" }}>{jam.picks?.[p.id] !== undefined ? "✓" : "…"} {p.name}</div>)}
-          </div>
+        <Panel head="本物はどれ？" icon="glass">
+          {options.map((o, i) => (
+            <button key={i} className={`btn btn-sm ${(mine === i || (mine === undefined && sel === i)) ? "btn-gold" : "btn-dark"}`}
+              onClick={() => amWakarun && mine === undefined && setSel(i)} disabled={!amWakarun || (mine !== undefined && mine !== i)}
+              style={{ justifyContent: "flex-start", fontSize: 18 }}>
+              <Letter i={i} on={mine === i || (mine === undefined && sel === i)} /><span style={{ flex: 1, textAlign: "left" }}>{o}</span>
+            </button>
+          ))}
+          {amWakarun && mine === undefined && (
+            <button className="btn btn-red" onClick={() => doPick(sel)} disabled={sel === null} style={{ marginBottom: 0 }}>{sel === null ? "えらんでから決定してね" : `「${ABC[sel]}」に決定！`}</button>
+          )}
+          {amWakarun && mine !== undefined && <div className="panel-note center">回答ずみ。みんなを待つてこ</div>}
+          {!amWakarun && <div className="panel-note center">{amDasmon ? "ワカルンの質問に答えるてこ。とぼけてもOK（バレたら…）" : "ワカルンを惑わす口出しOKてこ"}</div>}
+        </Panel>
+        {!amWakarun && (
+          <Panel head="回答状況" icon="people">
+            {wakarun.map((p) => <div key={p.id} className="prow"><span className="prow-mark">{picks[p.id] !== undefined ? <Icon name="check" size={24} /> : null}</span><span className="prow-nm">{p.name}</span><span className="prow-note">{picks[p.id] !== undefined ? "回答ずみ" : "考え中"}</span></div>)}
+          </Panel>
         )}
+        {isHost && hostTools}
       </Shell>
     );
   }
 
   // ════ 結果 ════
   if (room?.phase === "result") {
-    const truthIdx = (jam.order || []).indexOf(0);
+    const truthIdx = order.indexOf(0);
+    const flair = computeFlair(players, lb);
+    const got = wakarun.filter((p) => order[picks[p.id]] === 0).length;
     return (
       <Shell>
-        <Header sub={`ROUND ${room?.round || 1} 結果`} title="てこみの ワードジャマー" onBack={() => { if (window.confirm("ホームに戻る？（通算成績は消えないよ）")) onLeave(); }} />
-        <div style={{ textAlign: "center", padding: "10px 0 12px" }}>
-          <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}><OwlDoc size={64} bob expr="happy" /></div>
-          <div className="mp-title" style={{ fontSize: 22 }}>正解は {["Ⓐ", "Ⓑ", "Ⓒ"][truthIdx]}「{truth}」</div>
-          <div style={{ fontSize: 12, marginTop: 8, textShadow: "1px 1px 0 #000" }}>{jam.q}<br />見抜いたワカルン {room.outcome} 人</div>
+        {hdr(`ROUND ${room?.round || 1} 結果`)}
+        <div className="center pop">
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}><OwlDoc size={72} bob expr={got * 2 >= wakarun.length ? "happy" : "surprised"} /></div>
+          <div className="small" style={{ color: "#ddd" }}>{jam.q}</div>
+          <div className="mp-title" style={{ fontSize: 26, marginTop: 4 }}>本物は {ABC[truthIdx]}「{truth}」</div>
+          <div className="mp-lead" style={{ margin: "6px 0 14px" }}>見抜いたワカルン {got} / {wakarun.length} 人</div>
         </div>
-        <div className="mp-panel">
-          <div className="mp-panel-head" style={{ background: JAM_COLOR, color: "#fff" }}>★ 3つの答えと みんなの回答 ★</div>
+        <Panel head="3つの答えと、選んだ人" icon="glass" className="rise" style={{ animationDelay: ".4s" }}>
           {options.map((o, i) => {
-            const pickers = wakarun.filter((p) => jam.picks?.[p.id] === i).map((p) => p.name);
-            const real = jam.order[i] === 0;
+            const pickers = wakarun.filter((p) => picks[p.id] === i).map((p) => p.name);
+            const real = order[i] === 0;
             return (
-              <div key={i} style={{ padding: "7px 0", borderBottom: "2px dashed #ddd" }}>
-                <div style={{ fontSize: 15, color: real ? JAM_COLOR : "#E53935", fontWeight: real ? 700 : 400 }}>{["Ⓐ", "Ⓑ", "Ⓒ"][i]} {o} {real ? "★本物" : "（ジャマーの嘘）"}</div>
-                <div style={{ fontSize: 11, color: "#666" }}>{pickers.length ? pickers.join("・") : "―"}</div>
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 0", borderBottom: "2px dashed #d9d2bf" }}>
+                <Letter i={i} on={real} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 18, color: real ? "#1f7a4c" : "#c62828" }}>{o}{real ? "（本物）" : "（嘘）"}</div>
+                  <div className="small">{pickers.length ? pickers.join("・") : "―"}</div>
+                </div>
               </div>
             );
           })}
+        </Panel>
+        <Panel head="とくてん（このラウンド／合計）" icon="star">
+          <PlayerRows players={players} scores={room?.scores} delta={room?.lastDelta || {}} myId={myId} animate
+            mark={(p) => (p.id === jam.dasmonId ? "pencil" : p.id === jam.jammerId ? "devil" : flair[p.name] || null)} />
+        </Panel>
+        {isHost
+          ? <button className="btn btn-gold" onClick={onNextRound}><Icon name="arrowR" size={24} />次のラウンドへ（役を交代）</button>
+          : <div className="note-bar note-dark">部屋主が次のラウンドを始めるてこ</div>}
+        <div className="btn-row">
+          <button className="btn btn-dark btn-sm" onClick={openLb}><Icon name="trophy" size={24} />せいせき</button>
+          <button className="btn btn-cream btn-sm" onClick={onHome}><Icon name="door" size={24} />ホームへ</button>
         </div>
-        <ScoreRows players={players} scores={room?.scores} myId={myId} flair={flair}
-          colorOf={(p) => p.id === jam.dasmonId ? JAM_COLOR : p.id === jam.jammerId ? "#E53935" : "#111"}
-          extra={(p) => <span style={{ fontSize: 10, color: "#888" }}>　{p.id === jam.dasmonId ? "🎙" : p.id === jam.jammerId ? "😈" : "🔍"}</span>} />
-        {isHost ? (
-          <button className="mp-btn mp-green" onClick={onNextRound}>▶ 次のラウンド（役を交代してロビーへ）</button>
-        ) : (
-          <div style={{ textAlign: "center", color: "#fff", fontSize: 12, marginBottom: 10, textShadow: "1px 1px 0 #000" }}>🏠 部屋主が次のラウンドを始められるてこ</div>
-        )}
-        <button className="mp-btn mp-blue" onClick={openLb}>★ つうさんせいせき</button>
-        <button className="mp-btn mp-yellow" onClick={onLeave}>🚪 解散する</button>
       </Shell>
     );
   }
 
-  return <Shell><div style={{ textAlign: "center", paddingTop: 48 }}>…</div></Shell>;
+  return <Shell><div className="center" style={{ paddingTop: 48 }}>…</div></Shell>;
 }

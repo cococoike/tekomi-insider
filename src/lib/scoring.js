@@ -1,24 +1,23 @@
-import { loadLeaderboard, saveLeaderboard } from "./db";
+// 採点の保存（全ゲーム共通）。どのゲームも「採点は1回だけ」をトランザクションで保証する。
+import { transactRoom, transactLeaderboard } from "./db";
+import { addToBoard, ROOM } from "./util.js";
+import { claimResult } from "./rules.js";
 
-// 通算成績（leaderboard/）へ今ラウンドの増減を反映する。
-// delta: { name: 増減pt }、winners: 勝ったプレイヤー名の配列
-export async function applyLeaderboard(players, delta, winners = []) {
-  let board = {};
-  try { board = await loadLeaderboard(); } catch { board = {}; }
-  players.forEach((p) => {
-    const e = board[p.name] || { pts: 0, games: 0, wins: 0 };
-    e.games += 1;
-    e.pts += delta[p.name] || 0;
-    if (winners.includes(p.name)) e.wins += 1;
-    board[p.name] = e;
+// 部屋を結果画面へ進めて、得点を記録する。
+//   compute(いまの部屋) → { delta, winners, outcome, patch } を返す。採点しないなら null
+//   すでに他の端末が採点していたら何もしない（通算成績が二重に足されない）
+// 戻り値: 書き込めたときは最新の部屋、他の端末が先に済ませていたら null
+export async function finalizeRound(compute, code = ROOM) {
+  let claimed = null;
+  const res = await transactRoom(code, (cur) => {
+    claimed = claimResult(cur, compute);
+    return claimed ? claimed.next : undefined;
   });
-  try { await saveLeaderboard(board); } catch { /* 電波不良時は諦める */ }
-  return board;
-}
-
-// scores（部屋内の累計）に delta を足した新しい scores を返す
-export function addScores(scores, delta) {
-  const out = { ...(scores || {}) };
-  Object.entries(delta).forEach(([n, v]) => { out[n] = (out[n] || 0) + v; });
-  return out;
+  if (!res.committed || !claimed) return null;
+  const { delta, winners } = claimed.r;
+  // 通算成績も「読んで足して書く」を不可分にする
+  try {
+    await transactLeaderboard((board) => addToBoard(board, res.value.players, delta, winners));
+  } catch { /* 電波不良時は通算成績だけ諦める（部屋の得点は保存済み） */ }
+  return res.value;
 }

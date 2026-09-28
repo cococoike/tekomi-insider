@@ -26,3 +26,6 @@ dist-ssr
 # Firebase / env secrets
 .env
 .env.local
+
+# 撮影した全画面（npm run shots）
+shots/
