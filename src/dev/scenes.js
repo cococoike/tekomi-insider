@@ -31,6 +31,7 @@ export const SCENES = [
   { id: "home-resume", title: "ホーム（つづきから）", expect: "home", room: room({ hostId: "p2", masterId: "p2" }) },
   { id: "home-closed", title: "ホーム（閉まっている）", expect: "home", gate: false },
   { id: "home-host", title: "ホーム（主催者）", expect: "home", host: true },
+  { id: "home-offline", title: "ホーム（電波なし）", expect: "home", offline: true },
   { id: "lb", title: "通算成績", expect: "lb", screen: "lb" },
   { id: "guide-start", title: "あそびかた：はじめに", expect: "tutorial", screen: "tutorial", guideTab: "start" },
   { id: "guide-insider", title: "あそびかた：インサイダー", expect: "tutorial", screen: "tutorial", guideTab: "insider" },
@@ -38,7 +39,8 @@ export const SCENES = [
   { id: "guide-jammer", title: "あそびかた：ジャマー", expect: "tutorial", screen: "tutorial", guideTab: "jammer" },
   { id: "guide-opts", title: "あそびかた：オプション", expect: "tutorial", screen: "tutorial", guideTab: "opts" },
   // ── ロビー ──
-  { id: "lobby-host", title: "ロビー（部屋主・マスター）", expect: "lobby", host: true, room: room({ wordEnc: W("ハンバーガー"), follower: true }) },
+  { id: "lobby-host", title: "ロビー（部屋主・マスター・3ラウンド目＝設定はたたんである）", expect: "lobby", host: true, room: room({ wordEnc: W("ハンバーガー"), follower: true }) },
+  { id: "lobby-host-first", title: "ロビー（部屋主・1ラウンド目＝設定が開いている）", expect: "lobby", host: true, room: room({ round: 1, scores: {} }) },
   { id: "lobby-guest", title: "ロビー（参加者）", expect: "lobby", room: room({ hostId: "p2", masterId: "p3" }) },
   { id: "lobby-magic", title: "ロビー（マジカル・部屋主）", expect: "lobby", host: true, room: room({ magic: true, masterId: "p4" }) },
   { id: "lobby-wolf", title: "ロビー（ワードウルフ・部屋主）", expect: "lobby", host: true, room: room({ game: "wordwolf" }) },
@@ -54,6 +56,7 @@ export const SCENES = [
   // ── インサイダー：質問タイム ──
   { id: "game-master", title: "質問タイム（マスター・質問が来た）", expect: "game", screen: "game", room: playing({ masterId: "me1", hostId: "me1", startTime: ago(95), qa: [...QA, { id: "d", q: "パンにはさむ？", by: "そら" }] }) },
   { id: "game-common", title: "質問タイム（コモン・隠れている）", expect: "game", screen: "game", room: playing({ qa: QA }) },
+  { id: "game-offline", title: "質問タイム（電波なし）", expect: "game", screen: "game", offline: true, room: playing({ qa: QA }) },
   { id: "game-insider-peek", title: "質問タイム（インサイダー・押して見ている）", expect: "game", screen: "game", peek: true, room: playing({ insiderEnc: enc("me1"), qa: QA }) },
   { id: "game-villager-peek", title: "質問タイム（村人・押して見ている）", expect: "game", screen: "game", peek: true, room: playing({ magic: true, magicCards: CARDS, qa: QA }) },
   { id: "game-danger", title: "質問タイム（残り10秒以内）", expect: "game", screen: "game", room: playing({ startTime: ago(293), qa: QA }) },

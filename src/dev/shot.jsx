@@ -6,7 +6,7 @@
 import { createRoot } from "react-dom/client";
 import App from "../App";
 import { ShotCtx } from "../lib/shotctx";
-import { seedMock } from "../lib/db";
+import { seedMock, setOffline } from "../lib/db";
 import { device } from "../lib/device";
 import { setSound } from "../lib/sound";
 import { Shell } from "../ui";
@@ -15,14 +15,15 @@ import { SCENES, LB } from "./scenes";
 
 const STILL = `*, *::before, *::after { animation-duration:0s !important; animation-delay:0s !important; transition:none !important; }`;
 
-function markReadyWhen(expect) {
+// extra: 画面がそろってから、さらに待つ時間（圏外の帯は切れて1.5秒たってから出るので、その場面は長めに）
+function markReadyWhen(expect, extra = 0) {
   const t0 = Date.now();
   const id = setInterval(() => {
     const ok = !expect || document.body.dataset.screen === expect;
     const fonts = !document.fonts || document.fonts.status === "loaded";
     if ((ok && fonts) || Date.now() - t0 > 8000) {
       clearInterval(id);
-      setTimeout(() => { document.body.dataset.shot = ok ? "ready" : "timeout"; }, 150);
+      setTimeout(() => { document.body.dataset.shot = ok ? "ready" : "timeout"; }, 150 + extra);
     }
   }, 60);
 }
@@ -70,11 +71,11 @@ export function mountShot(el, params) {
   if (sc.host) device.set("tekomi_host", "1");
   const rooms = { __gate__: { open: sc.gate !== false } };
   if (sc.room) rooms.main = sc.room;
-  seedMock({ rooms, leaderboard: sc.lb || LB });
+  seedMock({ rooms, leaderboard: sc.lb || LB }).then(() => { if (sc.offline) setTimeout(() => setOffline(true), 400); });
   root.render(
     <ShotCtx.Provider value={{ peek: !!sc.peek, revealed: !!sc.revealed }}>
       <App shot={{ screen: sc.screen, guideTab: sc.guideTab, stay: sc.expect === "home" }} />
     </ShotCtx.Provider>,
   );
-  markReadyWhen(sc.expect);
+  markReadyWhen(sc.expect, sc.offline ? 2400 : 0);
 }

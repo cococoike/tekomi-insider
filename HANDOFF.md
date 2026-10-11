@@ -19,18 +19,19 @@
 | コマンド | 中身 |
 |---|---|
 | `npm test` | Node 標準のテスト（`tests/*.test.js`）。ルール・採点・入室・画面の決め方・Firebase のくせ・同時操作・お題リスト・アイコンの形 |
-| `npm run e2e` | Chrome を見えないまま起動し、**タブ4枚＝4人**で3ゲームを1周（同時入室・リロード復帰・二重採点なし・外す・締め切り中の復帰など20項目） |
-| `npm run shots` | 全52画面を 390×844 の2倍で撮って `shots/index.html` に並べる。**撮ったら1枚ずつ目で見る** |
+| `npm run e2e` | Chrome を見えないまま起動し、**タブ4枚＝4人**で3ゲームを1周（同時入室・リロード復帰・二重採点なし・圏外の帯と復帰・外す・締め切り中の復帰など23項目） |
+| `npm run shots` | 全55画面を 390×844 の2倍で撮って `shots/index.html` に並べる。**撮ったら1枚ずつ目で見る** |
 | `npm run build` / `npm run lint` | ビルドと lint（エラー0を保つ） |
 - 追加インストールは不要（Node 22+ の組み込み WebSocket と、PC の Chrome / Edge を使う。`scripts/lib/cdp.mjs`）
 - `npm run dev:mock`（http://localhost:5199/ ）: Firebase の代わりに偽の DB（`src/lib/db.mock.js`）。**同じブラウザのタブ同士で部屋を共有**、名前はタブごと（sessionStorage）。`?gallery` で全画面の見本、`?shot=<場面ID>` で1画面（場面は `src/dev/scenes.js`）
   - 中身は SharedWorker（`mockWorker.js`＋`mockServer.js`）が「サーバー役」として持ち、IndexedDB に保存する（全タブを閉じても残る）。書き込みは1つずつ、トランザクションは版番号つき＝本物と同じ動き
   - localStorage 共有ではタブ間の読み書きがずれて二重採点が起きた（偽の DB だけの不具合）ので、この形にした。モジュール型の SharedWorker は起動できないブラウザがあるため、`vite.config.js` が3ファイルを素のスクリプトにつないで `/__mock-worker.js` で配る（dev:mock のときだけ）
 - 偽の DB は本番の Firebase と同じ「保存のくせ」を再現する（`src/lib/fbnorm.js`）：null・空の値は消える／undefined や `. # $ / [ ]` を含むキーはエラー／添字キーは配列に戻る。**手元で動けば本番でも動く**ようにするため
+- 圏外も再現できる：コンソールで `__db.setOffline(true)`。本物と同じく、圏外中の読み書きは溜まり、`setOffline(false)` でまとめて流れる（場面 `home-offline` / `game-offline`）
 
 ## 技術スタック
 - Vite + React（SPA・クライアントのみ）。Firebase Realtime Database でリアルタイム同期
-- 全DBアクセスは `src/lib/db.js`：`subscribeRoom` / `saveRoom` / `setRoomField` / `updateRoom` / `loadRoom` / `transactRoom` / `loadLeaderboard` / `saveLeaderboard` / `transactLeaderboard`
+- 全DBアクセスは `src/lib/db.js`：`subscribeRoom` / `saveRoom` / `setRoomField` / `updateRoom` / `loadRoom` / `transactRoom` / `loadLeaderboard` / `saveLeaderboard` / `transactLeaderboard` / `subscribeConnected`（`.info/connected`）
 - `.env` に `VITE_FIREBASE_*`（gitには上げない。Vercelには環境変数設定済み）
 - Firebaseルールは `rooms/` と `leaderboard/` のみ read/write 許可。新しい保存先を足すならルール側も要更新
 - `vite.config.js` の `server.fs.strict:false` と `MOCK_DB` の差し替え設定は消さない
@@ -44,7 +45,7 @@
 - `src/lib/rules.js` … **ルールの正本**（純粋な関数）：採点 `scoreInsider/scoreWolf/scoreJammer`、入室 `applyJoin`、退室 `applyLeave`、開始 `startInsider`、ロビーへ `toLobby`、画面 `screenFor`、役職 `roleOf` など
 - `src/lib/rounds.js` … ウルフ・ジャマーのラウンド開始 / `src/lib/scoring.js` … 採点の保存 `finalizeRound`
 - `src/lib/util.js` … 小道具（`enc/dec`・`sanitizeName`・`topVote`・`addToBoard` …）/ `src/lib/roles.js` … 役職とゲームの見た目
-- `src/lib/words.js` … お題（通常6カテゴリ＋アダルト専用）・魔術カード・ウルフのペア・ジャマーの質問
+- `src/lib/words.js` … お題（通常6カテゴリ 約390語＋アダルト約200語）・魔術カード30・ウルフのペア110（＋アダルト50）・ジャマーの質問80（＋アダルト30）。足すときは `npm test` が重複を見つける
 - `src/lib/device.js` … 端末の記憶（uid・名前・主催者キー・音）/ `src/lib/hooks.js` … 画面スリープ防止・時計・音の切替
 - `src/dev/` … 撮影モード（本番のビルドには入らない）
 
@@ -54,6 +55,16 @@
 - 読んで決める操作は `transactRoom`（入室・退室・ゲーム開始・次のラウンド・延長・質問の追加・お題的中）。**fn は何度か呼ばれることがあるので中で副作用を起こさない**
 - **採点は `finalizeRound` だけ**（トランザクションで「未採点なら結果へ」を1回だけ通す。通算成績も `transactLeaderboard`）。採点役（部屋主）がすぐ、他の端末は `TAKEOVER_MS`(4秒) 後に肩代わりを試みるが、二重には入らない
 - 開票・採点は「最後に押した人の端末」ではなく、票が揃ったことを検知して走らせる
+
+## 電波が切れたとき（2026-10）
+- `Shell` が `useConnected()` を見て、切れてから1.5秒たつと画面の上に赤い帯「電波がないてこ…」を出す（起動直後や一瞬の途切れではチラつかせない）。接続の購読はアプリで1つ（`hooks.js` の `conn`）
+- ボタンの操作は `useAction()` の `run()` を通す：押している間は `busy`（ボタンが「通信中…」）、8秒返ってこなければ `err` に「つながらない…つながれば自動で進む」。圏外で押した操作は Firebase が覚えていて復帰時に流れるので、この文で合っている
+- `err` は画面が変わると消える（通信の文だけ。「部屋から外れた」のような文は残す）
+- ホームの読み込みが6秒以上かかると「時間がかかっている」と出す。ホームには「いま部屋に◯人」も出す
+
+## ロビーの並び（2026-10）
+- 人 → **このラウンドの操作（お題をひく・スタート）** → 「ゲームと設定（部屋主）」の折りたたみ → とくてん → あそびかた。設定の折りたたみは**1ラウンド目だけ開いていて、2ラウンド目からは閉じて要約一行**（ゲーム・モード・時間・決め方）。ウルフ／ジャマーのルールも同じく1ラウンド目だけ開く
+- 各ゲームは `XxxOptions`（設定の中身）と `XxxLobby`（スタートとルール）に分けて App のロビーに差し込む。e2e で2ラウンド目以降にゲームを変えるときは「ゲームと設定」を開いてから
 
 ## 画面の決め方
 - 画面は**部屋の進行（phase）から1つに決める**（`screenFor`）。以前は「今の画面→次の画面」の組み合わせだったため、投票中にリロードするとロビーに取り残された

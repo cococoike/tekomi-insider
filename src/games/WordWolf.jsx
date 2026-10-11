@@ -6,37 +6,43 @@ import { finalizeRound } from "../lib/scoring";
 import { ROOM, dec, computeFlair, topVote, scorerOf, TAKEOVER_MS } from "../lib/util";
 import { wolfCount, wolvesOf, wolfLeft, tallyWolf, scoreWolf } from "../lib/rules";
 import { GAMES } from "../lib/roles";
-import { useNow, buzz } from "../lib/hooks";
+import { useNow, useAction, buzz } from "../lib/hooks";
 import { sfxReveal, sfxVote } from "../lib/sound";
 import { ShotCtx } from "../lib/shotctx";
 import { Icon } from "../icons";
-import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, Seg, Secret, TimerBar, HostMenu } from "../ui";
+import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, Seg, Secret, TimerBar, HostMenu, Fold } from "../ui";
 
 const WOLF_TIMES = [{ k: 180, label: "3分" }, { k: 240, label: "4分" }, { k: 300, label: "5分" }];
 
-// ── ロビー内の設定 ──
-export function WolfSettings({ room, isHost, onStart, err }) {
+// ── ロビー：設定（部屋主の「ゲームと設定」の中身）──
+export function WolfOptions({ room }) {
+  const n = (room?.players || []).length;
+  return (
+    <>
+      <div className="label">オプション</div>
+      <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="お題のペアがきわどく…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
+      <div className="label">話し合いの時間</div>
+      <Seg items={WOLF_TIMES} value={room?.wolfDuration || 180} onChange={(s) => updateRoom(ROOM, { wolfDuration: s })} />
+      <div className="panel-note center" style={{ marginTop: 10 }}>ウルフは {wolfCount(n)}人（7人以上で2人）</div>
+    </>
+  );
+}
+
+// ── ロビー：スタートとルール（ルールは1ラウンド目だけ開いておく）──
+export function WolfLobby({ room, isHost, onStart, err, busy }) {
   const n = (room?.players || []).length;
   const dur = room?.wolfDuration || 180;
   return (
     <>
-      {isHost && (
-        <Panel head="ワードウルフ設定（部屋主）" icon="key">
-          <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="お題のペアがきわどく…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
-          <div className="label">話し合いの時間</div>
-          <Seg items={WOLF_TIMES} value={dur} onChange={(s) => updateRoom(ROOM, { wolfDuration: s })} />
-          <div className="panel-note center" style={{ marginTop: 10 }}>ウルフは {wolfCount(n)}人（7人以上で2人）</div>
-        </Panel>
-      )}
       {isHost ? (
         <>
-          <button className="btn btn-red" onClick={onStart} disabled={n < 3}><Icon name="arrowR" size={24} />{n < 3 ? `あと${3 - n}人` : "ワードウルフ スタート！"}</button>
+          <button className="btn btn-red" onClick={onStart} disabled={n < 3 || busy}><Icon name="arrowR" size={24} />{busy ? "通信中…" : n < 3 ? `あと${3 - n}人` : "ワードウルフ スタート！"}</button>
           <ErrBox>{err}</ErrBox>
         </>
       ) : (
         <div className="note-bar note-dark"><Icon name="wolf" size={24} />部屋主のスタートを待つてこ（話し合い {dur / 60}分・ウルフ {wolfCount(n)}人{room?.adult ? "・アダルト" : ""}）</div>
       )}
-      <Panel head="ワードウルフのルール" icon="wolf" headStyle={{ background: "linear-gradient(180deg,#8fb3ff,#5b8def)" }}>
+      <Fold head="ワードウルフのルール" icon="wolf" open={(room?.round || 1) === 1} headStyle={{ background: "linear-gradient(180deg,#8fb3ff,#5b8def)" }}>
         <div className="gd-grid">
           {[
             ["全員にお題が配られる。でも1人だけ違うお題（＝ウルフ）。自分がウルフかは分からない", null],
@@ -48,7 +54,7 @@ export function WolfSettings({ room, isHost, onStart, err }) {
             <div key={i} className="gd-pt"><div className="gd-num" style={{ width: 32, flex: "0 0 32px" }}>{i + 1}</div><div className="gd-pt-t">{t}</div>{p && <span className="chip chip-plus">{p}</span>}</div>
           ))}
         </div>
-      </Panel>
+      </Fold>
     </>
   );
 }
@@ -59,6 +65,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
   const [revealed, setRevealed] = useState(!!shot.revealed);
   const [guess, setGuess] = useState("");
   const [pick, setPick] = useState(null);
+  const { busy, err, run } = useAction(); // 通信中・つながらないときの表示
   const phase = room?.phase;
   const players = room?.players || [];
   const wolves = wolvesOf(room);
@@ -73,8 +80,8 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
   const G = GAMES.wordwolf;
   const hdr = (sub) => <Header title="ワードウルフ" icon="wolf" sub={sub || `ROUND ${room?.round || 1}`} onHome={onHome} />;
 
-  const toVote = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, phase: "vote", votes: null } : undefined));
-  const extend = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, wolfEndAt: Math.max(cur.wolfEndAt || 0, Date.now()) + 60000 } : undefined));
+  const toVote = () => run(() => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, phase: "vote", votes: null } : undefined)));
+  const extend = () => run(() => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, wolfEndAt: Math.max(cur.wolfEndAt || 0, Date.now()) + 60000 } : undefined)));
 
   // 開票：最多票が単独でウルフなら逆転チャンスへ。そうでなければウルフの逃げ切りで採点（どちらも1回だけ）
   const tally = async () => {
@@ -88,7 +95,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
   const doVote = async (targetId) => {
     if (!targetId || room?.votes?.[myId]) return;
     sfxVote(); buzz(40);
-    await setRoomField(ROOM, `votes/${myId}`, targetId); // 自分の票だけ書く
+    await run(() => setRoomField(ROOM, `votes/${myId}`, targetId)); // 自分の票だけ書く
   };
 
   // 票が全員ぶんそろったら開票。採点役（部屋主）がすぐ、寝ていれば他の端末が少し待って肩代わり
@@ -99,8 +106,8 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
     return () => clearTimeout(id);
   }, [phase, room, myId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const submitGuess = () => { if (guess.trim()) updateRoom(ROOM, { "wolf/guess": guess.trim().slice(0, 30) }); };
-  const judge = (ok) => finalizeRound((cur) => (cur.phase === "wolfguess" ? scoreWolf(cur, ok ? "reverse" : "citizens") : null));
+  const submitGuess = () => { if (guess.trim()) run(() => updateRoom(ROOM, { "wolf/guess": guess.trim().slice(0, 30) })); };
+  const judge = (ok) => run(() => finalizeRound((cur) => (cur.phase === "wolfguess" ? scoreWolf(cur, ok ? "reverse" : "citizens") : null)));
 
   // ════ 話し合い ════
   if (phase === "playing") {
@@ -118,6 +125,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
     return (
       <Shell>
         {hdr()}
+        <ErrBox>{err}</ErrBox>
         <TimerBar left={left} total={total} keeper={isHost} labelL="話し合い" labelR={`ウルフ ${wolves.length}人`} />
         <Secret label="あなたのお題" hint="押しているあいだだけ見える（まわりに見せない）">
           <div className="center" style={{ fontSize: 32, color: "#111", padding: "4px 0" }}>「{myWord}」</div>
@@ -125,8 +133,8 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
         </Secret>
         {isHost ? (
           <>
-            <button className="btn btn-gold" onClick={toVote}><Icon name="check" size={24} />話し合いおわり → 投票へ</button>
-            <button className="btn btn-cream btn-sm" onClick={extend}><Icon name="clock" size={24} />1分のばす</button>
+            <button className="btn btn-gold" onClick={toVote} disabled={busy}><Icon name="check" size={24} />{busy ? "通信中…" : "話し合いおわり → 投票へ"}</button>
+            <button className="btn btn-cream btn-sm" onClick={extend} disabled={busy}><Icon name="clock" size={24} />1分のばす</button>
             <HostMenu><button className="btn btn-dark btn-sm" onClick={onAbort}>ラウンド中止（点数なし・ロビーへ）</button></HostMenu>
           </>
         ) : left === 0 ? (
@@ -151,6 +159,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
           <div className="mp-title" style={{ fontSize: 26 }}>ウルフは誰だ？</div>
           <div className="mp-lead" style={{ margin: "6px 0 14px" }}>いちばん怪しい人に投票！</div>
         </div>
+        <ErrBox>{err}</ErrBox>
         <div className="note-bar note-dark"><Icon name="people" size={24} />{cnt} / {players.length} 人が投票{cnt > 0 && waiting.length ? `（まだ：${waiting.join("・")}）` : ""}</div>
         {myVote ? (
           <Panel><div className="center" style={{ padding: 8 }}><div className="small">あなたの投票</div><div style={{ fontSize: 22, margin: "4px 0" }}>{nameOf(myVote)}</div><div className="panel-note">開票を待つてこ</div></div></Panel>
@@ -161,12 +170,12 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
                 {pick === p.id && <Icon name="check" size={24} />}{p.name}
               </button>
             ))}
-            <button className="btn btn-red" onClick={() => doVote(pick)} disabled={!pick} style={{ marginBottom: 0 }}>{pick ? `「${nameOf(pick)}」に決定！` : "えらんでから決定してね"}</button>
+            <button className="btn btn-red" onClick={() => doVote(pick)} disabled={!pick || busy} style={{ marginBottom: 0 }}>{busy ? "通信中…" : pick ? `「${nameOf(pick)}」に決定！` : "えらんでから決定してね"}</button>
           </Panel>
         )}
         {isHost && (
           <HostMenu note="電波が悪くて票がそろわない時に使う">
-            <button className="btn btn-red btn-sm" onClick={() => { if (Object.keys(votes).length) tally(); }}>いまある票で開票する</button>
+            <button className="btn btn-red btn-sm" onClick={() => { if (Object.keys(votes).length) run(tally); }}>いまある票で開票する</button>
             <button className="btn btn-dark btn-sm" onClick={onAbort}>ラウンド中止（点数なし・ロビーへ）</button>
           </HostMenu>
         )}
@@ -182,6 +191,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
     return (
       <Shell>
         {hdr()}
+        <ErrBox>{err}</ErrBox>
         <div className="center pop">
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 8 }}><RoleChar role="wolf" size={72} /></div>
           <div className="mp-title" style={{ fontSize: 24 }}>{nameOf(caught)} がウルフだった！</div>
@@ -192,7 +202,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
             <Panel head="みんなのお題は…？" icon="fire" headStyle={{ background: "linear-gradient(180deg,#ff8a7e,#E53935)", color: "#fff" }}>
               <input className="mp-input" placeholder="多数派のお題を入力" value={guess} maxLength={30} enterKeyHint="send"
                 onChange={(e) => setGuess(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitGuess(); }} />
-              <button className="btn btn-red" onClick={submitGuess} disabled={!guess.trim()} style={{ marginBottom: 0 }}><Icon name="fire" size={24} />これだ！</button>
+              <button className="btn btn-red" onClick={submitGuess} disabled={!guess.trim() || busy} style={{ marginBottom: 0 }}><Icon name="fire" size={24} />{busy ? "通信中…" : "これだ！"}</button>
             </Panel>
           )
         ) : (
@@ -203,8 +213,8 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
                 <div className="panel-note center" style={{ marginBottom: 12 }}>多数派は「{maj}」。合ってる？{amWolf ? "（判定は市民）" : "（市民が判定）"}</div>
                 {!amWolf && (
                   <div className="btn-row" style={{ marginBottom: 0 }}>
-                    <button className="btn btn-red" onClick={() => judge(true)}>正解…逆転！</button>
-                    <button className="btn btn-gold" onClick={() => judge(false)}>ハズレ！</button>
+                    <button className="btn btn-red" onClick={() => judge(true)} disabled={busy}>正解…逆転！</button>
+                    <button className="btn btn-gold" onClick={() => judge(false)} disabled={busy}>ハズレ！</button>
                   </div>
                 )}
               </>
@@ -221,14 +231,17 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
     const oc = room?.outcome;
     const title = { citizens: "市民の勝利！", wolf: "ウルフの勝利！", reverse: "ウルフの大逆転！" }[oc] || "結果";
     const votes = room?.votes || {};
-    const { vc } = topVote(votes);
+    const { vc, top } = topVote(votes);
+    const tied = oc === "wolf" && Object.keys(votes).length > 0 && !top; // 票が割れて（同数で）逃げ切った
     const flair = computeFlair(players, lb);
     return (
       <Shell>
         {hdr(`ROUND ${room?.round || 1} 結果`)}
+        <ErrBox>{err}</ErrBox>
         <div className="center pop">
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}>{oc === "citizens" ? <RoleChar role="citizen" size={72} /> : <RoleChar role="wolf" size={72} />}</div>
           <div className="mp-title" style={{ fontSize: 28, color: oc === "citizens" ? "#D4AF37" : "#ff6b5e" }}>{title}</div>
+          {tied && <div className="mp-lead" style={{ marginTop: 4 }}>票が割れて同数 → ウルフの逃げ切りてこ</div>}
         </div>
         <Panel className="rise" style={{ animationDelay: ".3s" }}>
           <div style={{ display: "flex", justifyContent: "space-around", textAlign: "center", gap: 8 }}>
@@ -261,7 +274,7 @@ export function WolfGame({ room, myId, myName, isHost, lb, onHome, onAbort, onNe
           </Panel>
         )}
         {isHost
-          ? <button className="btn btn-gold" onClick={onNextRound}><Icon name="arrowR" size={24} />次のラウンドへ（ロビー）</button>
+          ? <button className="btn btn-gold" onClick={onNextRound} disabled={busy}><Icon name="arrowR" size={24} />次のラウンドへ（ロビー）</button>
           : <div className="note-bar note-dark">部屋主が次のラウンドを始めるてこ</div>}
         <div className="btn-row">
           <button className="btn btn-dark btn-sm" onClick={openLb}><Icon name="trophy" size={24} />せいせき</button>

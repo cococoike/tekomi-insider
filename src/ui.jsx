@@ -4,7 +4,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
 import { ROLES } from "./lib/roles";
 import { fmt } from "./lib/util";
-import { useSound, buzz } from "./lib/hooks";
+import { useSound, buzz, useConnected } from "./lib/hooks";
 import { sfxTick, sfxBuzzer } from "./lib/sound";
 import { ShotCtx } from "./lib/shotctx";
 
@@ -176,6 +176,13 @@ html, body { margin:0; background:#050505; }
 .note-red { background:var(--red); color:#fff; }
 .note-dark { background:#1d1d1d; color:#f3dc8f; border-color:var(--gold); }
 
+/* ── 圏外の帯（画面の上にはりつく）── */
+.offline { position:sticky; top:calc(env(safe-area-inset-top) + 4px); z-index:5; display:flex; align-items:center; gap:10px; background:var(--red); color:#fff;
+  border:3px solid #000; border-radius:12px; padding:10px 12px; margin-bottom:14px; box-shadow:0 4px 0 #000; font-size:var(--fs-m); line-height:1.5; animation:rise-in .3s ease-out both; }
+.offline small { display:block; font-size:var(--fs-xs); color:#ffd9d6; }
+.offline .px-icon { animation:tk-spin 1.6s steps(8) infinite; }
+@keyframes tk-spin { to { transform:rotate(360deg); } }
+
 /* ── 主催者メニュー ── */
 .hostmenu { margin-top:6px; }
 .hostmenu-body { border:3px dashed #7a6320; border-radius:12px; padding:12px 10px 0; margin-bottom:14px; }
@@ -245,12 +252,23 @@ const Stars = () => (
   ))}</>
 );
 
-export const Shell = ({ children }) => (
-  <>
-    <style>{CSS}</style>
-    <div className="mp-page"><Stars /><div className="mp-body">{children}</div></div>
-  </>
+// 電波が切れたら、どの画面でも上に赤い帯を出す（押しても反応しない理由が分かるように）
+const OfflineBar = () => (
+  <div className="offline" role="alert" aria-live="assertive">
+    <Icon name="refresh" size={36} />
+    <div>電波がないてこ…つなぎ直しているてこ<small>押した操作は、つながった瞬間に進むてこ</small></div>
+  </div>
 );
+
+export const Shell = ({ children }) => {
+  const connected = useConnected();
+  return (
+    <>
+      <style>{CSS}</style>
+      <div className="mp-page"><Stars /><div className="mp-body">{!connected && <OfflineBar />}{children}</div></div>
+    </>
+  );
+};
 
 // ── てこみん（ドット絵・SVG）。pal で色替え、expr で表情5種 ──
 const PX = { W: "#F4F1EA", K: "#1E1E1E", G: "#D4AF37", S: "#F6D9B8", E: "#141414", H: "#ffffff" };
@@ -472,14 +490,16 @@ export const Redacted = () => (
 );
 
 // たためるパネル（得点表など。最初は閉じておいて、見たい人だけ開く）
-export function Fold({ head, icon, children, open: initial = false }) {
+// note: 閉じているときに見出しの下に出す一行（いまの設定の要約など）
+export function Fold({ head, icon, note, children, open: initial = false, headStyle }) {
   const [open, setOpen] = useState(initial);
   return (
     <div className="panel">
       <button className="fold-btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        <span className="panel-head" style={{ flex: 1, marginBottom: 0 }}>{icon && <Icon name={icon} size={24} />}<span>{head}</span></span>
+        <span className="panel-head" style={{ flex: 1, marginBottom: 0, ...headStyle }}>{icon && <Icon name={icon} size={24} />}<span>{head}</span></span>
         <span style={{ fontSize: 18, color: "#7d5f10", width: 28, textAlign: "center" }}>{open ? "▲" : "▼"}</span>
       </button>
+      {!open && note && <div className="panel-note center" style={{ marginTop: 8 }}>{note}</div>}
       {open && <div style={{ marginTop: 12 }}>{children}</div>}
     </div>
   );

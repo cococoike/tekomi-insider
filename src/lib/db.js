@@ -49,6 +49,11 @@ export async function transactRoom(code, fn) {
   return { committed: res.committed, value: res.snapshot.exists() ? res.snapshot.val() : null };
 }
 
+// サーバーとつながっているか（切れると false、戻ると true）。Firebase が自分で判定して教えてくれる
+export function subscribeConnected(callback) {
+  return onValue(ref(db, ".info/connected"), (snap) => callback(snap.val() === true));
+}
+
 export async function loadLeaderboard() {
   const snap = await get(ref(db, "leaderboard"));
   return snap.exists() ? snap.val() : {};

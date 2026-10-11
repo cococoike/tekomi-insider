@@ -2,7 +2,8 @@
 //   npm run e2e            → 3つのゲームを1ラウンドずつ自動で遊び、結果を確かめる
 //   npm run e2e -- 出力先  → 途中の4人の画面も撮っておく
 // 確かめること：同時に3人入っても消えない／役職の配り方／投票中にリロードしても戻れる／
-//               採点が1回だけ（通算成績が二重に足されない）／帰った人を外せる／締め切り中でも「つづきから」で戻れる
+//               採点が1回だけ（通算成績が二重に足されない）／帰った人を外せる／締め切り中でも「つづきから」で戻れる／
+//               電波が切れると帯が出て、圏外で押した票はつながった瞬間に入る
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { launch } from "./lib/cdp.mjs";
@@ -112,7 +113,22 @@ try {
   await commonTab.reload();
   await waitScreen(commonTab, "vote");
   check(true, "投票中にリロードしても、投票画面に自動で戻る");
+  // ── 電波が切れた人：赤い帯が出て、圏外で押した票は「通信中」、つながった瞬間に入る ──
+  const offTab = tabs.find((t, i) => i !== 0 && uids[i] !== insider && t !== commonTab);
+  const offUid = uids[tabs.indexOf(offTab)];
+  await offTab.eval("window.__db.setOffline(true); true");
+  await offTab.waitFor("document.body.innerText.includes('電波がない')", 5000);
+  check(true, "電波が切れると、赤い帯が出る");
+  await click(offTab, nameOf(insider));
+  await click(offTab, "に決定");
+  await sleep(500);
+  check((await text(offTab)).includes("通信中"), "圏外で押した票は「通信中…」の表示になる");
+  await offTab.eval("window.__db.setOffline(false); true");
+  await offTab.waitFor("!document.body.innerText.includes('電波がない')", 5000);
+  await waitRoom(`r.votes && r.votes[${js(offUid)}] === ${js(insider)}`);
+  check(true, "つながった瞬間に票が入り、帯は消える");
   for (let i = 0; i < 4; i++) {
+    if (tabs[i] === offTab) continue; // 圏外のうちに投票ずみ
     const target = uids[i] === insider ? uids.find((u, j) => j !== 0 && u !== insider) : insider;
     await click(tabs[i], nameOf(target));
     await click(tabs[i], "に決定");
@@ -129,7 +145,8 @@ try {
   await click(tabs[0], "次のラウンドへ");
   await waitAll("lobby");
 
-  // ── ワードウルフ ──
+  // ── ワードウルフ（2ラウンド目からは「ゲームと設定」がたたんであるので、開いてからえらぶ）──
+  await click(tabs[0], "ゲームと設定");
   await click(tabs[0], "ウルフ");
   await waitRoom("r.game === 'wordwolf'");
   await click(tabs[0], "ワードウルフ スタート");
@@ -170,6 +187,7 @@ try {
   await waitAll("lobby");
 
   // ── ワードジャマー ──
+  await click(tabs[0], "ゲームと設定");
   await click(tabs[0], "ジャマー");
   await waitRoom("r.game === 'jammer'");
   await click(tabs[0], "ワードジャマー スタート");

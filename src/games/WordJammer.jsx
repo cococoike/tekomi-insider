@@ -6,10 +6,10 @@ import { finalizeRound } from "../lib/scoring";
 import { startJammerRound } from "../lib/rounds";
 import { ROOM, enc, dec, computeFlair, shuffle, scorerOf, TAKEOVER_MS } from "../lib/util";
 import { jammerRoles, scoreJammer } from "../lib/rules";
-import { buzz } from "../lib/hooks";
+import { useAction, buzz } from "../lib/hooks";
 import { sfxVote } from "../lib/sound";
 import { Icon } from "../icons";
-import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, HostMenu } from "../ui";
+import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, HostMenu, Fold } from "../ui";
 
 const ABC = ["A", "B", "C"];
 const Letter = ({ i, on }) => (
@@ -17,8 +17,18 @@ const Letter = ({ i, on }) => (
     background: on ? "#1a1a1a" : "#D4AF37", color: on ? "#D4AF37" : "#1a1200" }}>{ABC[i]}</span>
 );
 
-// ── ロビー内の設定 ──
-export function JammerSettings({ room, isHost, onStart, err }) {
+// ── ロビー：設定（部屋主の「ゲームと設定」の中身）──
+export function JammerOptions({ room }) {
+  return (
+    <>
+      <div className="label">オプション</div>
+      <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="きわどい質問カードも混ざる…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
+    </>
+  );
+}
+
+// ── ロビー：今回の役・スタート・ルール（ルールは1ラウンド目だけ開いておく）──
+export function JammerLobby({ room, isHost, onStart, err, busy }) {
   const n = (room?.players || []).length;
   const { dasmon, jammer } = jammerRoles(room);
   return (
@@ -32,20 +42,15 @@ export function JammerSettings({ room, isHost, onStart, err }) {
           </div>
         ))}
       </Panel>
-      {isHost && (
-        <Panel head="ワードジャマー設定（部屋主）" icon="key">
-          <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="きわどい質問カードも混ざる…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
-        </Panel>
-      )}
       {isHost ? (
         <>
-          <button className="btn btn-red" onClick={onStart} disabled={n < 3}><Icon name="arrowR" size={24} />{n < 3 ? `あと${3 - n}人` : "ワードジャマー スタート！"}</button>
+          <button className="btn btn-red" onClick={onStart} disabled={n < 3 || busy}><Icon name="arrowR" size={24} />{busy ? "通信中…" : n < 3 ? `あと${3 - n}人` : "ワードジャマー スタート！"}</button>
           <ErrBox>{err}</ErrBox>
         </>
       ) : (
         <div className="note-bar note-dark"><Icon name="memo" size={24} />部屋主のスタートを待つてこ</div>
       )}
-      <Panel head="ワードジャマーのルール" icon="memo" headStyle={{ background: "linear-gradient(180deg,#8fe0b0,#3cb371)" }}>
+      <Fold head="ワードジャマーのルール" icon="memo" open={(room?.round || 1) === 1} headStyle={{ background: "linear-gradient(180deg,#8fe0b0,#3cb371)" }}>
         <div className="gd-grid">
           {[
             ["ダスモンが質問カードに本当の答えを書く（例：子どもの頃なりたかった職業は？）", null],
@@ -58,7 +63,7 @@ export function JammerSettings({ room, isHost, onStart, err }) {
             <div key={i} className="gd-pt">{i < 3 && <div className="gd-num" style={{ width: 32, flex: "0 0 32px" }}>{i + 1}</div>}<div className="gd-pt-t">{t}</div>{p && <span className="chip chip-plus">{p}</span>}</div>
           ))}
         </div>
-      </Panel>
+      </Fold>
     </>
   );
 }
@@ -69,6 +74,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
   const [f1, setF1] = useState("");
   const [f2, setF2] = useState("");
   const [sel, setSel] = useState(null);
+  const { busy, err, run } = useAction(); // 通信中・つながらないときの表示
   const jam = room?.jam || {};
   const players = room?.players || [];
   const nameOf = (id) => players.find((p) => p.id === id)?.name || "?";
@@ -86,18 +92,18 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
 
   const submitAnswer = () => {
     if (!ans.trim()) return;
-    updateRoom(ROOM, { "jam/answerEnc": enc(ans.trim().slice(0, 20)), "jam/step": "fake" });
+    run(() => updateRoom(ROOM, { "jam/answerEnc": enc(ans.trim().slice(0, 20)), "jam/step": "fake" }));
   };
   const submitFakes = () => {
     if (!f1.trim() || !f2.trim()) return;
-    updateRoom(ROOM, { "jam/fakesEnc": [enc(f1.trim().slice(0, 20)), enc(f2.trim().slice(0, 20))], "jam/order": shuffle([0, 1, 2]), "jam/step": "pick" });
+    run(() => updateRoom(ROOM, { "jam/fakesEnc": [enc(f1.trim().slice(0, 20)), enc(f2.trim().slice(0, 20))], "jam/order": shuffle([0, 1, 2]), "jam/step": "pick" }));
   };
-  const redraw = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" && cur.jam?.step !== "pick" ? startJammerRound(cur) : undefined));
+  const redraw = () => run(() => transactRoom(ROOM, (cur) => (cur?.phase === "playing" && cur.jam?.step !== "pick" ? startJammerRound(cur) : undefined)));
   const finalize = () => finalizeRound((cur) => (cur.jam?.step === "pick" ? scoreJammer(cur) : null));
   const doPick = (idx) => {
     if (!amWakarun || picks[myId] !== undefined || idx === null) return;
     sfxVote(); buzz(40);
-    setRoomField(ROOM, `jam/picks/${myId}`, idx); // 自分の回答だけ書く
+    run(() => setRoomField(ROOM, `jam/picks/${myId}`, idx)); // 自分の回答だけ書く
   };
 
   // 全員が選んだら採点（採点役がすぐ、寝ていれば他の端末が肩代わり。二重採点はトランザクションで防ぐ）
@@ -109,10 +115,13 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
   }, [jam?.step, room, myId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const roleBar = (label) => (
+    <>
+    <ErrBox>{err}</ErrBox>
     <div className="note-bar note-dark" style={{ justifyContent: "space-between" }}>
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}><RoleChar role={myRole} size={36} bob={false} badge={false} />あなたは{{ dasmon: "ダスモン", jammer: "ジャマー", wakarun: "ワカルン" }[myRole]}</span>
       <span style={{ fontSize: 13, color: "#ddd" }}>{label}</span>
     </div>
+    </>
   );
   const qCard = (
     <Panel head={`${nameOf(jam.dasmonId)} への質問`} icon="pencil" headStyle={{ background: "linear-gradient(180deg,#8fe0b0,#3cb371)" }}>
@@ -123,7 +132,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
   const hostTools = (
     <HostMenu note="だれかの電波が切れて止まったときに使う">
       {jam.step !== "pick" && <button className="btn btn-dark btn-sm" onClick={redraw}>質問を引き直す（同じ役のまま）</button>}
-      {jam.step === "pick" && <button className="btn btn-red btn-sm" onClick={finalize}>いまある回答で締め切る</button>}
+      {jam.step === "pick" && <button className="btn btn-red btn-sm" onClick={() => run(finalize)}>いまある回答で締め切る</button>}
       <button className="btn btn-dark btn-sm" onClick={onAbort}>ラウンド中止（点数なし・次の人へ）</button>
     </HostMenu>
   );
@@ -139,7 +148,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
           <Panel head="本当の答え（ジャマーだけが見る）" icon="pencil">
             <input className="mp-input" placeholder="本当の答え（20文字まで）" value={ans} maxLength={20} enterKeyHint="done"
               onChange={(e) => setAns(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitAnswer(); }} />
-            <button className="btn btn-gold" onClick={submitAnswer} disabled={!ans.trim()} style={{ marginBottom: 0 }}><Icon name="check" size={24} />これで決定</button>
+            <button className="btn btn-gold" onClick={submitAnswer} disabled={!ans.trim() || busy} style={{ marginBottom: 0 }}><Icon name="check" size={24} />{busy ? "通信中…" : "これで決定"}</button>
           </Panel>
         ) : <div className="note-bar note-dark"><Icon name="pencil" size={24} />{nameOf(jam.dasmonId)} が本当の答えを書いてるてこ…</div>}
         <Bubble expr="thinking">{amDasmon ? "正直に書くてこ。あとで会話でとぼけてもいいけど、答えは本物てこ！" : amJammer ? "次はキミの番てこ。ダスモンに寄せた嘘を2つ考えておくてこ" : "ダスモンの顔をよく見ておくてこ。答えが出たら話して探るてこ"}</Bubble>
@@ -159,7 +168,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
             <div className="panel-note" style={{ marginBottom: 8 }}>それっぽい嘘を2つ。書き方のクセや長さも真似るてこ</div>
             <input className="mp-input" placeholder="嘘の答え 1" value={f1} maxLength={20} onChange={(e) => setF1(e.target.value)} />
             <input className="mp-input" placeholder="嘘の答え 2" value={f2} maxLength={20} onChange={(e) => setF2(e.target.value)} />
-            <button className="btn btn-red" onClick={submitFakes} disabled={!f1.trim() || !f2.trim()} style={{ marginBottom: 0 }}><Icon name="devil" size={24} />混ぜ込む！</button>
+            <button className="btn btn-red" onClick={submitFakes} disabled={!f1.trim() || !f2.trim() || busy} style={{ marginBottom: 0 }}><Icon name="devil" size={24} />{busy ? "通信中…" : "混ぜ込む！"}</button>
           </Panel>
         ) : <div className="note-bar note-dark"><Icon name="devil" size={24} />{nameOf(jam.jammerId)} が嘘を仕込んでるてこ…</div>}
         {isHost && hostTools}
@@ -183,7 +192,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
             </button>
           ))}
           {amWakarun && mine === undefined && (
-            <button className="btn btn-red" onClick={() => doPick(sel)} disabled={sel === null} style={{ marginBottom: 0 }}>{sel === null ? "えらんでから決定してね" : `「${ABC[sel]}」に決定！`}</button>
+            <button className="btn btn-red" onClick={() => doPick(sel)} disabled={sel === null || busy} style={{ marginBottom: 0 }}>{busy ? "通信中…" : sel === null ? "えらんでから決定してね" : `「${ABC[sel]}」に決定！`}</button>
           )}
           {amWakarun && mine !== undefined && <div className="panel-note center">回答ずみ。みんなを待つてこ</div>}
           {!amWakarun && <div className="panel-note center">{amDasmon ? "ワカルンの質問に答えるてこ。とぼけてもOK（バレたら…）" : "ワカルンを惑わす口出しOKてこ"}</div>}
@@ -206,6 +215,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
     return (
       <Shell>
         {hdr(`ROUND ${room?.round || 1} 結果`)}
+        <ErrBox>{err}</ErrBox>
         <div className="center pop">
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 6 }}><OwlDoc size={72} bob expr={got * 2 >= wakarun.length ? "happy" : "surprised"} /></div>
           <div className="small" style={{ color: "#ddd" }}>{jam.q}</div>
@@ -232,7 +242,7 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
             mark={(p) => (p.id === jam.dasmonId ? "pencil" : p.id === jam.jammerId ? "devil" : flair[p.name] || null)} />
         </Panel>
         {isHost
-          ? <button className="btn btn-gold" onClick={onNextRound}><Icon name="arrowR" size={24} />次のラウンドへ（役を交代）</button>
+          ? <button className="btn btn-gold" onClick={onNextRound} disabled={busy}><Icon name="arrowR" size={24} />次のラウンドへ（役を交代）</button>
           : <div className="note-bar note-dark">部屋主が次のラウンドを始めるてこ</div>}
         <div className="btn-row">
           <button className="btn btn-dark btn-sm" onClick={openLb}><Icon name="trophy" size={24} />せいせき</button>

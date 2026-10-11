@@ -41,7 +41,7 @@ if (local) {
   port = worker.port;
   port.onmessage = (ev) => {
     const m = ev.data;
-    if (m.type === "state") { state = { db: m.db, version: m.version }; markReady(); emitAll(); return; }
+    if (m.type === "state") { if (offline) heldState = m; else applyState(m); return; }
     const p = pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
@@ -50,7 +50,27 @@ if (local) {
   port.start();
   addEventListener("pagehide", () => { try { port.postMessage({ op: "bye" }); } catch { /* noop */ } });
 }
+// ── 圏外の再現（確認用）。本物と同じく、圏外中の読み書きは溜まり、つながった瞬間にまとめて流れる ──
+let offline = false;
+let heldState = null; // 圏外中に届いた最新の部屋（つながったら反映）
+const held = []; // 圏外中に押した操作
+const connSubs = new Set();
+export function subscribeConnected(callback) {
+  connSubs.add(callback);
+  Promise.resolve().then(() => callback(!offline));
+  return () => { connSubs.delete(callback); };
+}
+export function setOffline(v) {
+  offline = !!v;
+  connSubs.forEach((cb) => cb(!offline));
+  if (offline) return;
+  if (heldState) { const m = heldState; heldState = null; applyState(m); }
+  held.splice(0).forEach((f) => f());
+}
+function applyState(m) { state = { db: m.db, version: m.version }; markReady(); emitAll(); }
+
 function call(op, args) {
+  if (offline) return new Promise((resolve) => { held.push(() => resolve(call(op, args))); });
   if (local) {
     const res = local.handle(op, args);
     if (res && res.changed) { state = local.snapshot(); setTimeout(emitAll, 0); }
@@ -126,5 +146,5 @@ export function seedMock({ rooms = {}, leaderboard = {} } = {}) {
 export function resetMock() { return call("seed", { rooms: {}, leaderboard: {} }); }
 
 if (typeof window !== "undefined") {
-  window.__db = { read: () => structuredClone(state.db), saveRoom, setRoomField, updateRoom, loadRoom, transactRoom, loadLeaderboard, saveLeaderboard, seedMock, resetMock };
+  window.__db = { read: () => structuredClone(state.db), saveRoom, setRoomField, updateRoom, loadRoom, transactRoom, loadLeaderboard, saveLeaderboard, seedMock, resetMock, setOffline, isOffline: () => offline };
 }

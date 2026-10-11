@@ -9,13 +9,13 @@ import {
 } from "./lib/rules";
 import { ROLES, GAMES } from "./lib/roles";
 import { device } from "./lib/device";
-import { useWakeLock, useNow, useSound, buzz } from "./lib/hooks";
+import { useWakeLock, useNow, useSound, useAction, buzz, MSG_TIMEOUT, MSG_FAIL } from "./lib/hooks";
 import { ShotCtx } from "./lib/shotctx";
 import { Icon } from "./icons";
 import { OwlDoc, RoleChar, Logo, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, Tile, OptRow, Seg, Secret, TimerBar, HostMenu, Fold } from "./ui";
 import Guide from "./Guide";
-import { WolfSettings, WolfGame } from "./games/WordWolf";
-import { JammerSettings, JammerGame } from "./games/WordJammer";
+import { WolfOptions, WolfLobby, WolfGame } from "./games/WordWolf";
+import { JammerOptions, JammerLobby, JammerGame } from "./games/WordJammer";
 import { startWolfRound, startJammerRound } from "./lib/rounds";
 
 const GATE = "__gate__"; // 開閉フラグの保存先（rooms/ 配下なので既存ルールでOK）
@@ -94,8 +94,9 @@ export default function TekomiInsider({ shot = null }) {
   const [overlayBack, setOverlayBack] = useState("home");
   const [pick, setPick] = useState(null); // 投票でえらんだ人（決定前）
   const [qInput, setQInput] = useState("");
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
+  const { busy, err, setErr, run } = useAction(); // 通信中・つながらないときの表示
+  const [inRoom, setInRoom] = useState(null); // ホームに出す「いま何人いるか」
+  const [slow, setSlow] = useState(false); // 読み込みが長引いている
   const [lb, setLb] = useState(null);
   const [cat, setCat] = useState("おまかせ");
   const [gateOpen, setGateOpen] = useState(null); // null=読込中
@@ -115,6 +116,17 @@ export default function TekomiInsider({ shot = null }) {
   // ゲーム中は画面を消さない
   useWakeLock(!!roomCode);
 
+  // 画面が変わったら「通信の」エラー文は消す（圏外で押した操作が後から通って進んだとき、文が残らない）。
+  // 「部屋から外れた」のような、画面が変わるのと同時に出す文は残す
+  useEffect(() => { setErr((e) => (e === MSG_TIMEOUT || e === MSG_FAIL ? "" : e)); }, [screen, setErr]);
+
+  // 読み込みが長引いたら、そう伝える（圏外ではないが電波が弱いとき）。表示は gateOpen === null のときだけ
+  useEffect(() => {
+    if (gateOpen !== null) return undefined;
+    const id = setTimeout(() => setSlow(true), 6000);
+    return () => clearTimeout(id);
+  }, [gateOpen]);
+
   // 開閉フラグを購読
   useEffect(() => subscribeRoom(GATE, (d) => setGateOpen(!!(d && d.open))), []);
 
@@ -131,6 +143,7 @@ export default function TekomiInsider({ shot = null }) {
     loadRoom(ROOM).then((d) => {
       const me = d?.players?.find((p) => p.id === myIdRef.current);
       if (!alive) return;
+      setInRoom(d ? { n: (d.players || []).length, playing: !!d.phase && d.phase !== "lobby" } : null);
       if (!me) { if (shot && OVERLAYS.has(shot.screen)) openOverlay(shot.screen); return; }
       setResume(me.name);
       if ((d.phase && d.phase !== "lobby") || (shot && !shot.stay)) doEnter(me.name);
@@ -162,7 +175,7 @@ export default function TekomiInsider({ shot = null }) {
       }
     });
     return () => unsub();
-  }, [roomCode]);
+  }, [roomCode, setErr]);
 
   // 投票がそろったら開票（採点役＝部屋主がすぐ、寝ていたら他の端末が少し待って肩代わり。二重採点はトランザクションで防ぐ）
   useEffect(() => {
@@ -200,8 +213,7 @@ export default function TekomiInsider({ shot = null }) {
     const name = sanitizeName(resumeName ?? fName);
     if (!name) return setErr("なまえをいれてね");
     if (!resumeName && !gateOpen && !hostUnlocked) return setErr("いまは開いてないよ。主催者がオープンにするまで待ってね");
-    setLoading(true); setErr("");
-    try {
+    await run(async () => {
       let out = null;
       const res = await transactRoom(ROOM, (cur) => { out = applyJoin(cur, { name, uid: myIdRef.current, asHost: hostUnlocked }); return out.next; });
       if (!out || out.error) { setErr("いまゲーム中…このラウンドが終わってロビーに戻ったら入れるてこ"); return; }
@@ -215,12 +227,7 @@ export default function TekomiInsider({ shot = null }) {
       if (shot && OVERLAYS.has(shot.screen)) { setOverlayBack(next); next = shot.screen; if (next === "lb") loadLeaderboard().then(setLb); }
       screenRef.current = next; setScreen(next);
       setRoomCode(ROOM);
-    } catch (e) {
-      console.error(e);
-      setErr("つながらなかったてこ…電波を確かめて、もう一度押してね");
-    } finally {
-      setLoading(false);
-    }
+    });
   }
 
   // 自分の画面だけホームへ（部屋には残る。同じ名前で入り直せば戻れる）
@@ -228,7 +235,10 @@ export default function TekomiInsider({ shot = null }) {
     const nm = myName;
     setRoomCode(""); roomRef.current = null; setRoom(null); setRoleRevealed(false); setQInput(""); setPick(null); setErr("");
     setS("home");
-    loadRoom(ROOM).then((d) => { setResume(d?.players?.some((p) => p.id === myIdRef.current) ? nm : null); }).catch(() => {});
+    loadRoom(ROOM).then((d) => {
+      setResume(d?.players?.some((p) => p.id === myIdRef.current) ? nm : null);
+      setInRoom(d ? { n: (d.players || []).length, playing: !!d.phase && d.phase !== "lobby" } : null);
+    }).catch(() => {});
   };
   const goHome = () => {
     if (window.confirm("ホームにもどる？\nゲームは続いているので、「つづきから」でいつでも戻れるてこ")) toHome();
@@ -241,21 +251,22 @@ export default function TekomiInsider({ shot = null }) {
   };
   const doKick = async (p) => {
     if (!window.confirm(`「${p.name}」を部屋から外す？\n（帰った人・電波が切れた人をはずす用。同じ名前で入り直せば戻れる）`)) return;
-    await transactRoom(ROOM, (cur) => applyLeave(cur, p.id));
+    await run(() => transactRoom(ROOM, (cur) => applyLeave(cur, p.id)));
   };
 
   const doResetRoom = async () => {
     if (!window.confirm("部屋をリセットする？\n入っている人は全員ホームに戻され、部屋の点数も消えるてこ（通算成績は残る）")) return;
     const name = sanitizeName(myName || fName) || "主催者";
     const data = freshRoom(name, myIdRef.current);
-    await saveRoom(ROOM, data);
+    const ok = await run(async () => { await saveRoom(ROOM, data); return true; });
+    if (!ok) return;
     device.set("tekomi_name", name);
     setMyName(name); setFName(name); setResume(name);
     roomRef.current = data; setRoom(data); setRoleRevealed(false); setErr("");
     setS("lobby"); setRoomCode(ROOM);
   };
 
-  const setGate = async (open) => { await saveRoom(GATE, { open }); setGateOpen(open); };
+  const setGate = (open) => run(async () => { await saveRoom(GATE, { open }); setGateOpen(open); });
   const tryHostUnlock = () => {
     const k = window.prompt("主催者キーを入力してね");
     if (k === null) return;
@@ -272,8 +283,8 @@ export default function TekomiInsider({ shot = null }) {
 
   const doClearLeaderboard = async () => {
     if (!window.confirm("通算成績を全部消すよ？（全員ぶん・元に戻せない）")) return;
-    try { await saveLeaderboard({}); } catch { /* noop */ }
-    setLb({});
+    const ok = await run(async () => { await saveLeaderboard({}); return true; });
+    if (ok) setLb({});
   };
 
   // ── ロビーの設定（部屋主）。変える項目だけ書く＝同時に入ってきた人を消さない ──
@@ -296,48 +307,49 @@ export default function TekomiInsider({ shot = null }) {
 
   // ── インサイダーの進行 ──────────────────────────────
   const doGenWord = () => updateRoom(ROOM, { wordEnc: enc(pickWord(cat, room?.usedWords || [], !!room?.adult)) });
+  // どの操作も run() を通す：押している間は busy、8秒返ってこなければ「電波を確かめて」と出る
   const doStart = async () => {
-    setErr("");
-    const res = await transactRoom(ROOM, (cur) => startInsider(cur, { deal: dealMagicCards }));
-    if (!res.committed) setErr("始められなかったてこ（お題と3人以上が必要）");
+    const res = await run(() => transactRoom(ROOM, (cur) => startInsider(cur, { deal: dealMagicCards })));
+    if (res && !res.committed) setErr("始められなかったてこ（お題と3人以上が必要）");
   };
   const doStartSub = async () => {
-    setErr("");
-    const res = await transactRoom(ROOM, (cur) => {
+    const res = await run(() => transactRoom(ROOM, (cur) => {
       if (!cur || cur.phase !== "lobby" || (cur.players || []).length < 3) return undefined;
       return (cur.game || "insider") === "wordwolf" ? startWolfRound(cur) : startJammerRound(cur);
-    });
-    if (!res.committed) setErr("始められなかったてこ（3人以上が必要）");
+    }));
+    if (res && !res.committed) setErr("始められなかったてこ（3人以上が必要）");
   };
   const doAsk = async () => {
     const q = qInput.trim();
     if (!q) return;
-    const res = await transactRoom(ROOM, (cur) => {
+    const res = await run(() => transactRoom(ROOM, (cur) => {
       if (!cur || cur.phase !== "playing") return undefined;
       const qa = cur.qa || [];
       if (qa.length && isUnanswered(qa[qa.length - 1])) return undefined; // 1問ずつ
       return { ...cur, qa: [...qa, { id: genId(), q: q.slice(0, 60), by: myName }] };
-    });
-    if (res.committed) setQInput("");
+    }));
+    if (res?.committed) setQInput("");
   };
-  const doAnswer = (i, ans) => setRoomField(ROOM, `qa/${i}/ans`, ans);
+  const doAnswer = (i, ans) => run(() => setRoomField(ROOM, `qa/${i}/ans`, ans));
   const doWordGuessed = async () => {
-    const res = await transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, phase: "vote", wordGuessed: true, votes: null } : undefined));
-    if (res.committed) sfxCorrect();
+    // 押し間違いで投票へ飛ぶと戻せない（ラウンド中止しかない）ので、ひと言たしかめる
+    if (!window.confirm("お題が当たった？\n「OK」で投票へ進むてこ")) return;
+    const res = await run(() => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, phase: "vote", wordGuessed: true, votes: null } : undefined)));
+    if (res?.committed) sfxCorrect();
   };
-  const doExtend = () => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, duration: (cur.duration || 300) + 60 } : undefined));
-  const doTimeUp = () => finalizeRound((cur) => (cur.phase === "playing"
-    ? { ...scoreInsider({ ...cur, wordGuessed: false }), patch: { wordGuessed: false } } : null));
+  const doExtend = () => run(() => transactRoom(ROOM, (cur) => (cur?.phase === "playing" ? { ...cur, duration: (cur.duration || 300) + 60 } : undefined)));
+  const doTimeUp = () => run(() => finalizeRound((cur) => (cur.phase === "playing"
+    ? { ...scoreInsider({ ...cur, wordGuessed: false }), patch: { wordGuessed: false } } : null)));
   const doVote = async (targetId) => {
     if (!targetId || room?.votes?.[myId]) return;
     sfxVote(); buzz(40);
-    await setRoomField(ROOM, `votes/${myId}`, targetId); // 自分の票だけ書く（他人の票を消さない）
+    await run(() => setRoomField(ROOM, `votes/${myId}`, targetId)); // 自分の票だけ書く（他人の票を消さない）
   };
-  const doForceFinalize = () => finalizeRound((cur) => (cur.phase === "vote" ? scoreInsider(cur) : null));
-  const doNextRound = () => transactRoom(ROOM, (cur) => (cur?.phase === "result" ? toLobby(cur) : undefined));
+  const doForceFinalize = () => run(() => finalizeRound((cur) => (cur.phase === "vote" ? scoreInsider(cur) : null)));
+  const doNextRound = () => run(() => transactRoom(ROOM, (cur) => (cur?.phase === "result" ? toLobby(cur) : undefined)));
   const doAbort = () => {
     if (!window.confirm("このラウンドを中止してロビーにもどる？（点数は入らない）")) return;
-    transactRoom(ROOM, (cur) => (cur && cur.phase !== "lobby" ? toLobby(cur) : undefined));
+    run(() => transactRoom(ROOM, (cur) => (cur && cur.phase !== "lobby" ? toLobby(cur) : undefined)));
   };
 
   // ════ HOME ════
@@ -353,20 +365,25 @@ export default function TekomiInsider({ shot = null }) {
       </div>
 
       {resume && (
-        <button className="btn btn-gold pop" onClick={() => doEnter(resume)} disabled={loading} style={{ marginTop: 10 }}>
+        <button className="btn btn-gold pop" onClick={() => doEnter(resume)} disabled={busy} style={{ marginTop: 10 }}>
           <Icon name="arrowR" size={24} />「{resume}」でつづきから
         </button>
       )}
 
       {gateOpen === null ? (
-        <Panel><div className="panel-note center" style={{ padding: 10 }}>…よみこみ中…</div></Panel>
+        <Panel><div className="panel-note center" style={{ padding: 10 }}>…よみこみ中…{slow && gateOpen === null && <><br />つながるのに時間がかかっているてこ。電波を確かめてね</>}</div></Panel>
       ) : (gateOpen || hostUnlocked) ? (
         <Panel>
           <input className="mp-input" placeholder="あなたのなまえ（10文字まで）" value={fName} maxLength={10} enterKeyHint="go"
             onChange={(e) => setFName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doEnter(); }} />
-          <button className={`btn ${resume ? "btn-cream" : "btn-gold"}`} onClick={() => doEnter()} disabled={loading} style={{ marginBottom: 0 }}>
-            <Icon name="arrowR" size={24} />{loading ? "…" : resume ? "この名前ではじめる" : "はじめる"}
+          <button className={`btn ${resume ? "btn-cream" : "btn-gold"}`} onClick={() => doEnter()} disabled={busy} style={{ marginBottom: 0 }}>
+            <Icon name="arrowR" size={24} />{busy ? "通信中…" : resume ? "この名前ではじめる" : "はじめる"}
           </button>
+          {inRoom && inRoom.n > 0 && !resume && (
+            <div className="panel-note center" style={{ marginTop: 10 }}>
+              いま部屋に <b style={{ color: "#7d5f10" }}>{inRoom.n}人</b>{inRoom.playing ? "（ゲーム中。ロビーに戻ったら入れるてこ）" : "いるてこ"}
+            </div>
+          )}
           {hostUnlocked && !gateOpen && <div className="panel-note center" style={{ marginTop: 10, color: "#c62828" }}>いまはクローズ中。下の「オープンにする」でみんなが入れるてこ</div>}
         </Panel>
       ) : (
@@ -390,8 +407,8 @@ export default function TekomiInsider({ shot = null }) {
       {hostUnlocked ? (
         <Panel head="主催者メニュー" icon="key">
           {gateOpen
-            ? <button className="btn btn-red btn-sm" onClick={() => setGate(false)}><Icon name="lock" size={24} />クローズする（締め切る）</button>
-            : <button className="btn btn-gold btn-sm" onClick={() => setGate(true)}><Icon name="unlock" size={24} />オープンにする（みんな入れる）</button>}
+            ? <button className="btn btn-red btn-sm" onClick={() => setGate(false)} disabled={busy}><Icon name="lock" size={24} />クローズする（締め切る）</button>
+            : <button className="btn btn-gold btn-sm" onClick={() => setGate(true)} disabled={busy}><Icon name="unlock" size={24} />オープンにする（みんな入れる）</button>}
           <button className="btn btn-dark btn-sm" onClick={doResetRoom} style={{ marginBottom: 0 }}><Icon name="refresh" size={24} />部屋をリセットして新しく始める</button>
         </Panel>
       ) : (
@@ -434,15 +451,23 @@ export default function TekomiInsider({ shot = null }) {
   }
 
   // ════ ロビー（全ゲーム共通）════
+  // 並び：人 → このラウンドの操作（お題・スタート）→ ゲームと設定（2ラウンド目からは折りたたみ）→ とくてん → あそびかた
   if (screen === "lobby") {
     const G = GAMES[game];
     const flair = computeFlair(players, lb);
     const wordSet = !!room?.wordEnc;
     const masterName = players.find((p) => p.id === room?.masterId)?.name || "?";
     const rule = room?.masterRule || "random";
+    const round = room?.round || 1;
+    const who = magic ? "魔術師" : "マスター";
+    const summary = game === "insider"
+      ? `${G.short}・${optsSummary(room)}・${(room?.duration || 300) / 60}分・${MASTER_RULES.find((r) => r.k === rule)?.label || ""}`
+      : game === "wordwolf"
+        ? `${G.short}・話し合い${(room?.wolfDuration || 180) / 60}分${room?.adult ? "・アダルト" : ""}`
+        : `${G.short}${room?.adult ? "・アダルト" : ""}`;
     return (
       <Shell>
-        <Header title={G.label} icon={G.icon} sub={`ROUND ${room?.round || 1}`} onHome={doLeave} />
+        <Header title={G.label} icon={G.icon} sub={`ROUND ${round}`} onHome={doLeave} />
 
         <Panel head={`プレイヤー ${players.length}人`} icon="people">
           <PlayerRows players={players} scores={room?.scores} myId={myId}
@@ -453,7 +478,7 @@ export default function TekomiInsider({ shot = null }) {
           {game === "insider" && (
             <div className="note-bar" style={{ background: "#fff", margin: "10px 0 0", justifyContent: "flex-start", textAlign: "left", fontSize: 14 }}>
               <Icon name={magic ? "wizard" : "mic"} size={24} />
-              <span>今回の{magic ? "魔術師" : "マスター"}：<b style={{ color: "#c62828", fontSize: 16 }}>{masterName}</b>{room?.masterId === myId ? "（あなた）" : ""}
+              <span>今回の{who}：<b style={{ color: "#c62828", fontSize: 16 }}>{masterName}</b>{room?.masterId === myId ? "（あなた）" : ""}
                 <br /><span className="small">決め方：{MASTER_RULES.find((r) => r.k === rule)?.label}{room?.masterId !== myId ? (wordSet ? "・お題は準備OK" : "・お題をえらび中") : ""}</span></span>
             </div>
           )}
@@ -464,57 +489,57 @@ export default function TekomiInsider({ shot = null }) {
           )}
         </Panel>
 
+        {/* ── このラウンドの操作 ── */}
+        {game === "insider" && (isMaster ? (
+          <>
+            <Panel head={`お題をきめる（あなたが${who}）`} icon={magic ? "wizard" : "mic"}>
+              {room?.adult
+                ? <div className="panel-note center" style={{ color: "#8a1fc2", marginBottom: 10 }}>アダルト専用のお題から出るてこ（カテゴリは選べない）</div>
+                : <div className="chips">{CATS.map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div>}
+              <button className="btn btn-cream btn-sm" onClick={doGenWord}><Icon name="dice" size={24} />{wordSet ? "お題を引き直す" : "お題をひく"}</button>
+              {wordSet && (
+                <Secret label="引いたお題" hint="押しているあいだだけ見える（まわりに見せない）">
+                  <div className="center" style={{ fontSize: 26, color: "#c62828" }}>「{dec(room.wordEnc)}」</div>
+                </Secret>
+              )}
+            </Panel>
+            <button className="btn btn-red" onClick={doStart} disabled={!wordSet || players.length < 3 || busy}>
+              <Icon name="arrowR" size={24} />{busy ? "通信中…" : players.length < 3 ? `あと${3 - players.length}人` : !wordSet ? "お題をひいてね" : "ゲームスタート！"}
+            </button>
+            <ErrBox>{err}</ErrBox>
+          </>
+        ) : (
+          <div className="note-bar note-dark"><span>モード：{optsSummary(room)} ／ {who}のスタートを待つてこ</span></div>
+        ))}
+        {game === "wordwolf" && <WolfLobby room={room} isHost={isHost} onStart={doStartSub} err={err} busy={busy} />}
+        {game === "jammer" && <JammerLobby room={room} isHost={isHost} onStart={doStartSub} err={err} busy={busy} />}
+
+        {/* ── ゲームと設定（部屋主）。1ラウンド目は開いておき、2ラウンド目からは閉じて要約だけ ── */}
         {isHost && (
-          <Panel head="ゲームをえらぶ" icon="star">
+          <Fold head="ゲームと設定（部屋主）" icon="key" open={round === 1} note={summary}>
+            <div className="label">あそぶゲーム</div>
             <div className="tiles">
               {Object.entries(GAMES).map(([k, g]) => <Tile key={k} on={game === k} color={g.color} icon={g.icon} label={g.short} onClick={() => setGame(k)} />)}
             </div>
-            <div className="panel-note center" style={{ marginTop: 10 }}>{G.desc}</div>
-          </Panel>
-        )}
-
-        {game === "insider" && (
-          <>
-            {isHost && (
-              <Panel head="ゲーム設定（部屋主）" icon="key">
+            <div className="panel-note center" style={{ marginTop: 8 }}>{G.desc}</div>
+            {game === "insider" && (
+              <>
+                <div className="label">オプション</div>
                 {OPTS.map((o) => <OptRow key={o.key} on={!!room[o.key]} color={o.color} icon={o.icon} label={o.label} desc={o.desc} onClick={() => toggleOpt(o.key)} />)}
                 {room.follower && players.length < 6 && !magic && <div className="panel-note center">フォロワーは6人以上で有効（いまは{players.length}人）</div>}
                 {magic && <div className="panel-note center">マジカル中は 平和村・フォロワー は使えないてこ</div>}
-                <div className="label">{magic ? "魔術師" : "マスター"}の決め方</div>
+                <div className="label">{who}の決め方</div>
                 <Seg items={MASTER_RULES} value={rule} onChange={setMasterRule} />
                 <div className="label">せいげん時間</div>
-                <Seg items={TIMES} value={room.duration || 300} onChange={(s) => updateRoom(ROOM, { duration: s })} />
-              </Panel>
-            )}
-
-            {isMaster ? (
-              <>
-                <Panel head={`お題をきめる（あなたが${magic ? "魔術師" : "マスター"}）`} icon={magic ? "wizard" : "mic"}>
-                  {room?.adult
-                    ? <div className="panel-note center" style={{ color: "#8a1fc2", marginBottom: 10 }}>アダルト専用のお題から出るてこ（カテゴリは選べない）</div>
-                    : <div className="chips">{CATS.map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div>}
-                  <button className="btn btn-cream btn-sm" onClick={doGenWord}><Icon name="dice" size={24} />{wordSet ? "お題を引き直す" : "お題をひく"}</button>
-                  {wordSet && (
-                    <Secret label="引いたお題" hint="押しているあいだだけ見える（まわりに見せない）">
-                      <div className="center" style={{ fontSize: 26, color: "#c62828" }}>「{dec(room.wordEnc)}」</div>
-                    </Secret>
-                  )}
-                </Panel>
-                <button className="btn btn-red" onClick={doStart} disabled={!wordSet || players.length < 3}>
-                  <Icon name="arrowR" size={24} />{players.length < 3 ? `あと${3 - players.length}人` : !wordSet ? "お題をひいてね" : "ゲームスタート！"}
-                </button>
-                <ErrBox>{err}</ErrBox>
+                <Seg items={TIMES} value={room.duration || 300} onChange={(sec) => updateRoom(ROOM, { duration: sec })} />
               </>
-            ) : (
-              <div className="note-bar note-dark"><span>モード：{optsSummary(room)} ／ {magic ? "魔術師" : "マスター"}のスタートを待つてこ</span></div>
             )}
-            <PointsPanel magic={magic} />
-          </>
+            {game === "wordwolf" && <WolfOptions room={room} />}
+            {game === "jammer" && <JammerOptions room={room} />}
+          </Fold>
         )}
 
-        {game === "wordwolf" && <WolfSettings room={room} isHost={isHost} onStart={doStartSub} err={err} />}
-        {game === "jammer" && <JammerSettings room={room} isHost={isHost} onStart={doStartSub} err={err} />}
-
+        {game === "insider" && <PointsPanel magic={magic} />}
         <button className="btn btn-cream btn-sm" onClick={() => openOverlay("tutorial")}><Icon name="book" size={24} />あそびかた（ルールを見る）</button>
         {isHost && <HostMenu><button className="btn btn-dark btn-sm" onClick={doResetRoom}><Icon name="refresh" size={24} />部屋をリセット（全員ホームへ）</button></HostMenu>}
         <Bubble>
@@ -609,6 +634,7 @@ export default function TekomiInsider({ shot = null }) {
     return (
       <Shell>
         {hdr}
+        <ErrBox>{err}</ErrBox>
         <TimerBar left={left} total={room?.duration || 300} keeper={isMaster} labelL="のこり時間" labelR={optsSummary(room)} />
         <Secret>{roleCard}</Secret>
         {magic && myCard && (
@@ -629,10 +655,10 @@ export default function TekomiInsider({ shot = null }) {
         )}
         {isMaster && (
           <>
-            <button className="btn btn-gold" onClick={doWordGuessed}><Icon name="check" size={24} />お題的中！ → {magic ? "インサイダーを指名" : "投票へ"}</button>
+            <button className="btn btn-gold" onClick={doWordGuessed} disabled={busy}><Icon name="check" size={24} />お題的中！ → {magic ? "インサイダーを指名" : "投票へ"}</button>
             <div className="btn-row">
-              <button className="btn btn-cream btn-sm" onClick={doExtend}><Icon name="clock" size={24} />1分のばす</button>
-              {left === 0 && <button className="btn btn-red btn-sm" onClick={doTimeUp}><Icon name="hourglass" size={24} />時間切れで終了</button>}
+              <button className="btn btn-cream btn-sm" onClick={doExtend} disabled={busy}><Icon name="clock" size={24} />1分のばす</button>
+              {left === 0 && <button className="btn btn-red btn-sm" onClick={doTimeUp} disabled={busy}><Icon name="hourglass" size={24} />時間切れで終了</button>}
             </div>
           </>
         )}
@@ -641,7 +667,7 @@ export default function TekomiInsider({ shot = null }) {
             <input className="mp-input" style={{ marginBottom: 0, flex: 1 }} placeholder={pending ? "回答待ち…" : "質問を書く（例：食べられる？）"}
               value={qInput} maxLength={60} enterKeyHint="send" onChange={(e) => setQInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !pending) doAsk(); }} disabled={!!pending} />
-            <button className="btn btn-gold btn-sm" style={{ width: "auto", padding: "0 16px", marginBottom: 0 }} onClick={doAsk} disabled={!!pending || !qInput.trim()}>送る</button>
+            <button className="btn btn-gold btn-sm" style={{ width: "auto", padding: "0 16px", marginBottom: 0 }} onClick={doAsk} disabled={!!pending || !qInput.trim() || busy}>送る</button>
           </div>
         )}
         {!isMaster && left === 0 && <div className="note-bar note-red"><Icon name="hourglass" size={24} />時間切れ！ {magic ? "魔術師" : "マスター"}の判定を待つてこ</div>}
@@ -689,6 +715,7 @@ export default function TekomiInsider({ shot = null }) {
           <div className="mp-title" style={{ fontSize: 26 }}>お題は暴かれた！</div>
           <div className="mp-lead" style={{ margin: "6px 0 14px" }}>{magic ? "魔術師よ、インサイダーを見破れ！" : "インサイダーは誰だ？ 全員で投票！"}</div>
         </div>
+        <ErrBox>{err}</ErrBox>
         <div className="note-bar note-dark"><Icon name="people" size={24} />{voteCount} / {voters.length} 人が投票{waiting.length > 0 && voteCount > 0 ? `（まだ：${waiting.join("・")}）` : ""}</div>
 
         {magic && !isMaster ? (
@@ -705,8 +732,8 @@ export default function TekomiInsider({ shot = null }) {
             {room?.peace && !magic && (
               <button className={`btn btn-sm ${pick === NONE_ID ? "btn-gold" : "btn-cream"}`} onClick={() => setPick(NONE_ID)}><Icon name="halo" size={24} />インサイダーはいない（平和村）</button>
             )}
-            <button className="btn btn-red" onClick={() => doVote(pick)} disabled={!pick} style={{ marginBottom: 0 }}>
-              {pick ? `「${nameOf(pick)}」に決定！` : "えらんでから決定してね"}
+            <button className="btn btn-red" onClick={() => doVote(pick)} disabled={!pick || busy} style={{ marginBottom: 0 }}>
+              {busy ? "通信中…" : pick ? `「${nameOf(pick)}」に決定！` : "えらんでから決定してね"}
             </button>
           </Panel>
         )}
@@ -780,8 +807,9 @@ export default function TekomiInsider({ shot = null }) {
           </Panel>
         )}
 
+        <ErrBox>{err}</ErrBox>
         {isHost
-          ? <button className="btn btn-gold" onClick={doNextRound}><Icon name="arrowR" size={24} />次のラウンドへ（ロビー）</button>
+          ? <button className="btn btn-gold" onClick={doNextRound} disabled={busy}><Icon name="arrowR" size={24} />{busy ? "通信中…" : "次のラウンドへ（ロビー）"}</button>
           : <div className="note-bar note-dark">部屋主が次のラウンドを始めるてこ</div>}
         <div className="btn-row">
           <button className="btn btn-dark btn-sm" onClick={() => openOverlay("lb")}><Icon name="trophy" size={24} />せいせき</button>
