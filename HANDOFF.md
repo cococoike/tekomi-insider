@@ -45,7 +45,7 @@
 - `src/lib/rules.js` … **ルールの正本**（純粋な関数）：採点 `scoreInsider/scoreWolf/scoreJammer`、入室 `applyJoin`、退室 `applyLeave`、開始 `startInsider`、ロビーへ `toLobby`、画面 `screenFor`、役職 `roleOf` など
 - `src/lib/rounds.js` … ウルフ・ジャマーのラウンド開始 / `src/lib/scoring.js` … 採点の保存 `finalizeRound`
 - `src/lib/util.js` … 小道具（`enc/dec`・`sanitizeName`・`topVote`・`addToBoard` …）/ `src/lib/roles.js` … 役職とゲームの見た目
-- `src/lib/words.js` … お題（通常6カテゴリ 約390語＋アダルト約200語）・魔術カード30・ウルフのペア110（＋アダルト50）・ジャマーの質問80（＋アダルト30）。足すときは `npm test` が重複を見つける
+- `src/lib/words.js` … お題（通常7カテゴリ 682語＋アダルト231語）・魔術カード40・ウルフのペア164（＋アダルト62）・ジャマーの質問120（＋アダルト40）。カテゴリを足すときは App.jsx の `CATS` と Guide の文も。足すときは `npm test` が重複を見つける
 - `src/lib/device.js` … 端末の記憶（uid・名前・主催者キー・音）/ `src/lib/hooks.js` … 画面スリープ防止・時計・音の切替
 - `src/dev/` … 撮影モード（本番のビルドには入らない）
 

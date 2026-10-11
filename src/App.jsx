@@ -20,7 +20,7 @@ import { startWolfRound, startJammerRound } from "./lib/rounds";
 
 const GATE = "__gate__"; // 開閉フラグの保存先（rooms/ 配下なので既存ルールでOK）
 const HOST_KEY = "tekomi"; // 主催者キー（開閉できる人だけが知る合言葉。変更可）
-const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "むずかしめ"];
+const CATS = ["おまかせ", "食べもの", "場所", "モノ", "生きもの", "エンタメ", "しごと・学校", "むずかしめ"];
 const OVERLAYS = new Set(["tutorial", "lb"]); // 見ている間もゲームは進む画面
 
 // インサイダーのオプション（独立 ON/OFF。マジカルは役職の形が変わるので平和村・フォロワーとは同時に使わない）
