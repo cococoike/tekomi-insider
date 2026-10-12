@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   WORD_LIST, ADULT_LIST, MAGIC_CARDS, WOLF_PAIRS, WOLF_PAIRS_ADULT, JAMMER_QUESTIONS, JAMMER_QUESTIONS_ADULT,
-  pickWord, pickWolfPair, pickJammerQuestion, dealMagicCards,
+  pickWord, pickWolfPair, pickJammerQuestion, dealMagicCards, categoryOf,
 } from "../src/lib/words.js";
 
 const dupes = (arr) => arr.filter((x, i) => arr.indexOf(x) !== i);
@@ -53,4 +53,12 @@ test("魔術カード：人数ぶん配れて、人数が少なければ重複�
   assert.equal(five.length, 5);
   assert.equal(new Set(five.map((c) => c.t)).size, 5);
   assert.equal(dealMagicCards(30).length, 30);
+});
+
+test("お題：カテゴリを引ける（ヒント用）。アダルトは「アダルト」、知らない語は null", () => {
+  assert.equal(categoryOf(WORD_LIST["食べもの"][0]), "食べもの");
+  assert.equal(categoryOf(ADULT_LIST[0]), "アダルト");
+  assert.equal(categoryOf("そんな語は無い"), null);
+  // 2つのカテゴリにある語（将棋＝モノ・エンタメ など）は、どちらかが返ればよい
+  for (const list of Object.values(WORD_LIST)) for (const w of list) assert.ok(WORD_LIST[categoryOf(w)]?.includes(w), `${w} のカテゴリが引けない`);
 });

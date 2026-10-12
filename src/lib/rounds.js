@@ -6,7 +6,7 @@ import { wolfCount, jammerRoles } from "./rules.js";
 export function startWolfRound(room, now = Date.now()) {
   const players = room.players || [];
   const [maj, min] = pickWolfPair(room.usedPairs || [], !!room.adult);
-  const wolves = shuffle(players).slice(0, wolfCount(players.length)).map((p) => p.id);
+  const wolves = shuffle(players).slice(0, wolfCount(players.length, room.wolfN)).map((p) => p.id);
   const dur = room.wolfDuration || 180;
   return {
     ...room, phase: "playing", votes: null, scored: false, outcome: null, lastDelta: null,

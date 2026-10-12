@@ -13,6 +13,7 @@ import { Icon } from "../icons";
 import { OwlDoc, RoleChar, Bubble, Shell, Header, Panel, ErrBox, PlayerRows, OptRow, Seg, Secret, TimerBar, HostMenu, Fold } from "../ui";
 
 const WOLF_TIMES = [{ k: 180, label: "3分" }, { k: 240, label: "4分" }, { k: 300, label: "5分" }];
+const WOLF_N = [{ k: "auto", label: "自動" }, { k: 1, label: "1人" }, { k: 2, label: "2人" }];
 
 // ── ロビー：設定（部屋主の「ゲームと設定」の中身）──
 export function WolfOptions({ room }) {
@@ -23,7 +24,9 @@ export function WolfOptions({ room }) {
       <OptRow on={!!room.adult} color="#a020e0" icon="chili" label="アダルト" desc="お題のペアがきわどく…完全に身内だけの席で" onClick={() => updateRoom(ROOM, { adult: !room.adult })} />
       <div className="label">話し合いの時間</div>
       <Seg items={WOLF_TIMES} value={room?.wolfDuration || 180} onChange={(s) => updateRoom(ROOM, { wolfDuration: s })} />
-      <div className="panel-note center" style={{ marginTop: 10 }}>ウルフは {wolfCount(n)}人（7人以上で2人）</div>
+      <div className="label">ウルフの人数</div>
+      <Seg items={WOLF_N} value={room?.wolfN || "auto"} onChange={(v) => updateRoom(ROOM, { wolfN: v })} />
+      <div className="panel-note center" style={{ marginTop: 10 }}>いまの人数だとウルフは {wolfCount(n, room?.wolfN)}人（自動＝7人以上で2人。2人は5人以上から）</div>
     </>
   );
 }
@@ -40,7 +43,7 @@ export function WolfLobby({ room, isHost, onStart, err, busy }) {
           <ErrBox>{err}</ErrBox>
         </>
       ) : (
-        <div className="note-bar note-dark"><Icon name="wolf" size={24} />部屋主のスタートを待つてこ（話し合い {dur / 60}分・ウルフ {wolfCount(n)}人{room?.adult ? "・アダルト" : ""}）</div>
+        <div className="note-bar note-dark"><Icon name="wolf" size={24} />部屋主のスタートを待つてこ（話し合い {dur / 60}分・ウルフ {wolfCount(n, room?.wolfN)}人{room?.adult ? "・アダルト" : ""}）</div>
       )}
       <Fold head="ワードウルフのルール" icon="wolf" open={(room?.round || 1) === 1} headStyle={{ background: "linear-gradient(180deg,#8fb3ff,#5b8def)" }}>
         <div className="gd-grid">

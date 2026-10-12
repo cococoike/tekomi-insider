@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useContext } from "react";
 import { subscribeRoom, saveRoom, setRoomField, updateRoom, loadRoom, transactRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
-import { pickWord, dealMagicCards } from "./lib/words";
+import { pickWord, dealMagicCards, categoryOf } from "./lib/words";
 import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, sfxReveal, sfxVote } from "./lib/sound";
 import { finalizeRound } from "./lib/scoring";
 import { genId, ROOM, NONE_ID, enc, dec, computeFlair, scorerOf, TAKEOVER_MS, topVote, sanitizeName } from "./lib/util";
@@ -29,13 +29,47 @@ const OPTS = [
   { key: "peace",    label: "平和村",     icon: "halo",  color: "#8a8a8a", desc: "10%でインサイダーがいない回" },
   { key: "adult",    label: "アダルト",   icon: "chili", color: "#a020e0", desc: "お題がきわどく…身内だけの席で" },
   { key: "follower", label: "フォロワー", icon: "ninja", color: "#7a2fa0", desc: "6人以上で、インサイダーに隠れ味方" },
+  { key: "hint",     label: "カテゴリ公開", icon: "book",  color: "#2e9a5f", desc: "お題のカテゴリを全員に見せる（初めての人向け・やさしめ）" },
 ];
+// ロビーで待っている人に出すコツ（ラウンドごとに変わる）
+const TIPS = [
+  "質問は「はい／いいえ」で答えられる形にするてこ。「どこで使う？」より「家で使う？」てこ",
+  "最初は大きく分けるてこ：食べ物？生き物？手に持てる？",
+  "やけに鋭い人と、やけに黙っている人。どっちも怪しいてこ",
+  "インサイダーは「当てさせたい」。正解に近づく質問を誰が出したか覚えておくてこ",
+  "時間切れはみんな損。迷ったら、とにかく質問するてこ",
+  "当たった瞬間の「誰がうれしそうか」も手がかりてこ",
+  "マスターの答えが「わからない」のときは、質問の言い方を変えるてこ",
+];
+// 結果画面のてこみんの一言（展開に合わせて変える）
+function resultComment(room, players) {
+  const oc = room?.outcome;
+  const votes = room?.votes || {};
+  const insiderId = room?.isPeaceVillage ? null : dec(room?.insiderEnc || "");
+  const onInsider = Object.values(votes).filter((v) => v === insiderId).length;
+  const n = Object.keys(votes).length;
+  const word = dec(room?.wordEnc || "");
+  const ins = players.find((p) => p.id === insiderId)?.name || "インサイダー";
+  switch (oc) {
+    case "commons": return n > 0 && onInsider === n ? `満場一致てこ！ ${ins}、一瞬でバレたてこ…` : onInsider * 2 >= n ? "よく見抜いたてこ！ 鋭い質問が効いたてこ" : "票は割れたけど、ちゃんと見抜いたてこ！";
+    case "insider": return onInsider === 0 ? `完全犯罪てこ…！ 誰も ${ins} を疑わなかったてこ` : "票が割れて逃げ切り！ インサイダーは冷や汗てこ";
+    case "timeout": return `時間切れ…お題は「${word}」だったてこ。「はい／いいえ」で答えられる質問が近道てこ`;
+    case "peace_win": return "インサイダーはいなかった！ 疑いすぎなかったのがえらいてこ";
+    case "peace_lose": return "いない犯人を探してしまったてこ…疑心暗鬼てこ";
+    case "peace_timeout": return `時間切れ…お題は「${word}」。しかも誰も裏切っていなかったてこ`;
+    case "magic_wizard": return "魔術師の目は節穴じゃなかったてこ！ 村人の演技、どこでバレた？";
+    case "magic_village": return "村人チームの演技勝ちてこ！ 魔術カードの縛りの中でよくやったてこ";
+    case "magic_timeout": return `時間切れ…お題は「${word}」。縛りがきつすぎた？てこ`;
+    default: return "";
+  }
+}
 const optsSummary = (r) => {
   const on = [];
   if (r?.magic) on.push("マジカル");
   if (r?.peace && !r?.magic) on.push("平和村");
   if (r?.adult) on.push("アダルト");
   if (r?.follower && !r?.magic) on.push("フォロワー");
+  if (r?.hint) on.push("ヒント");
   return on.length ? on.join("＋") : "ふつう";
 };
 
@@ -306,7 +340,10 @@ export default function TekomiInsider({ shot = null }) {
   };
 
   // ── インサイダーの進行 ──────────────────────────────
-  const doGenWord = () => updateRoom(ROOM, { wordEnc: enc(pickWord(cat, room?.usedWords || [], !!room?.adult)) });
+  const doGenWord = () => {
+    const w = pickWord(cat, room?.usedWords || [], !!room?.adult);
+    updateRoom(ROOM, { wordEnc: enc(w), wordCat: categoryOf(w) }); // wordCat は「カテゴリ公開」のヒント用（秘密ではない）
+  };
   // どの操作も run() を通す：押している間は busy、8秒返ってこなければ「電波を確かめて」と出る
   const doStart = async () => {
     const res = await run(() => transactRoom(ROOM, (cur) => startInsider(cur, { deal: dealMagicCards })));
@@ -546,7 +583,7 @@ export default function TekomiInsider({ shot = null }) {
           {game !== "insider"
             ? (isHost ? `${G.label}だてこ！ 設定を決めて「スタート」を押すてこ` : `今回は${G.label}だてこ。部屋主のスタートを待つてこ`)
             : isMaster ? (magic ? "キミが今回の魔術師！ お題を引いてスタートだてこ。村人チームの中のインサイダーを見破るてこ！" : "キミが今回のマスター！ お題を引いてスタートだてこ！")
-            : isHost ? "設定はキミ（部屋主）が決めるてこ。帰った人は × で外せるてこ" : "今回のマスターが準備中てこ。ちょっと待つてこ"}
+            : isHost ? "設定はキミ（部屋主）が決めるてこ。帰った人は × で外せるてこ" : `今回のマスターが準備中てこ。コツ：${TIPS[(round + players.length) % TIPS.length]}`}
         </Bubble>
       </Shell>
     );
@@ -619,6 +656,9 @@ export default function TekomiInsider({ shot = null }) {
               <div className="center" style={{ fontSize: 15, marginTop: 4 }}>{myCard.d}</div>
             </Panel>
           )}
+          {room?.hint && room?.wordCat && !knowsWord && (
+            <div className="note-bar" style={{ background: "#fff", color: "#1a1a1a" }}><Icon name="book" size={24} />ヒント：お題のカテゴリは「{room.wordCat}」</div>
+          )}
           <button className="btn btn-gold" onClick={() => setS("game")}><Icon name="check" size={24} />おぼえた！ スタート</button>
           <div className="mp-lead" style={{ fontSize: 13, color: "#bbb" }}>ここからは、押しているあいだだけ表示するてこ</div>
         </div>
@@ -637,6 +677,9 @@ export default function TekomiInsider({ shot = null }) {
         <ErrBox>{err}</ErrBox>
         <TimerBar left={left} total={room?.duration || 300} keeper={isMaster} labelL="のこり時間" labelR={optsSummary(room)} />
         <Secret>{roleCard}</Secret>
+        {room?.hint && room?.wordCat && (
+          <div className="note-bar" style={{ background: "#fff", color: "#1a1a1a" }}><Icon name="book" size={24} />ヒント：お題のカテゴリは「{room.wordCat}」</div>
+        )}
         {magic && myCard && (
           <div className="note-bar note-dark" style={{ justifyContent: "flex-start", textAlign: "left" }}>
             <Icon name="wand" size={24} /><span><b>魔術カード「{myCard.t}」</b><br />{myCard.d}</span>
@@ -789,6 +832,18 @@ export default function TekomiInsider({ shot = null }) {
           </Panel>
         )}
 
+        {magic && room?.magicCards && (
+          <Panel head="みんなの魔術カード" icon="wand" className="rise" style={{ animationDelay: ".6s" }}>
+            {players.filter((p) => room.magicCards[p.id]).map((p) => (
+              <div key={p.id} className="prow" style={{ minHeight: 40 }}>
+                <span className="prow-nm" style={{ fontSize: 15 }}>{p.name}</span>
+                <span style={{ fontSize: 15, color: "#2f5fc4" }}>「{room.magicCards[p.id].t}」</span>
+              </div>
+            ))}
+            <div className="panel-note center" style={{ marginTop: 6 }}>縛りを守れてた？ 破ってたらみんなでツッコむてこ</div>
+          </Panel>
+        )}
+
         <Panel head="とくてん（このラウンド／合計）" icon="star">
           <PlayerRows players={players} scores={room?.scores} delta={room?.lastDelta || {}} myId={myId} mark={markOf} animate
             nameColor={(p) => (p.id === insiderId ? "#c62828" : undefined)}
@@ -807,6 +862,7 @@ export default function TekomiInsider({ shot = null }) {
           </Panel>
         )}
 
+        {resultComment(room, players) && <Bubble expr={good ? "happy" : "thinking"}>{resultComment(room, players)}</Bubble>}
         <ErrBox>{err}</ErrBox>
         {isHost
           ? <button className="btn btn-gold" onClick={doNextRound} disabled={busy}><Icon name="arrowR" size={24} />{busy ? "通信中…" : "次のラウンドへ（ロビー）"}</button>

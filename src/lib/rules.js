@@ -256,7 +256,12 @@ export function scoreInsider(data) {
 }
 
 // ── ワードウルフ ─────────────────────────────────────
-export const wolfCount = (n) => (n >= 7 ? 2 : 1);
+// ウルフの人数。pref が "auto"（または無し）なら7人以上で2人。1 / 2 を指定もできる（2人は5人以上から）
+export const wolfCount = (n, pref = "auto") => {
+  if (pref === 1 || pref === "1") return 1;
+  if (pref === 2 || pref === "2") return n >= 5 ? 2 : 1;
+  return n >= 7 ? 2 : 1;
+};
 export const wolvesOf = (room) => { try { return JSON.parse(dec(room?.wolf?.wolvesEnc || "")) || []; } catch { return []; } };
 export const wolfLeft = (room, now = Date.now()) =>
   (room?.wolfEndAt ? Math.max(0, Math.round((room.wolfEndAt - now) / 1000)) : (room?.wolfDuration || 180));

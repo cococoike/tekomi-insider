@@ -333,3 +333,9 @@ export function dealMagicCards(n) {
   for (let i = 0; i < n; i++) out.push(shuffled[i % shuffled.length]);
   return out;
 }
+
+// お題がどのカテゴリの語か（「カテゴリ公開」のヒント用）。アダルトは "アダルト"、不明なら null
+export function categoryOf(word) {
+  for (const [cat, list] of Object.entries(WORD_LIST)) if (list.includes(word)) return cat;
+  return ADULT_LIST.includes(word) ? "アダルト" : null;
+}

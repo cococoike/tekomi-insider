@@ -260,3 +260,14 @@ test("ジャマー開始：役がじゅんぐりで決まり、質問が1枚配�
   assert.equal(r.jam.step, "answer");
   assert.ok(r.jam.q && [1, 2, 3].includes(r.jam.pts));
 });
+
+import { wolfCount } from "../src/lib/rules.js";
+test("ウルフの人数：自動は7人以上で2人、部屋主が1人／2人を指定できる（2人は5人以上から）", () => {
+  assert.equal(wolfCount(4), 1);
+  assert.equal(wolfCount(7), 2);
+  assert.equal(wolfCount(7, 1), 1);
+  assert.equal(wolfCount(5, 2), 2);
+  assert.equal(wolfCount(4, 2), 1);
+  const r = startWolfRound({ ...freshRoom("あ", "a"), players: P.slice(0, 5), wolfN: 2 });
+  assert.equal(JSON.parse(dec(r.wolf.wolvesEnc)).length, 2);
+});

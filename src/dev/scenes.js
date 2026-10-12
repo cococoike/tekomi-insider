@@ -57,6 +57,7 @@ export const SCENES = [
   { id: "game-master", title: "質問タイム（マスター・質問が来た）", expect: "game", screen: "game", room: playing({ masterId: "me1", hostId: "me1", startTime: ago(95), qa: [...QA, { id: "d", q: "パンにはさむ？", by: "そら" }] }) },
   { id: "game-common", title: "質問タイム（コモン・隠れている）", expect: "game", screen: "game", room: playing({ qa: QA }) },
   { id: "game-offline", title: "質問タイム（電波なし）", expect: "game", screen: "game", offline: true, room: playing({ qa: QA }) },
+  { id: "game-hint", title: "質問タイム（カテゴリ公開）", expect: "game", screen: "game", room: playing({ hint: true, wordCat: "食べもの", qa: QA }) },
   { id: "game-insider-peek", title: "質問タイム（インサイダー・押して見ている）", expect: "game", screen: "game", peek: true, room: playing({ insiderEnc: enc("me1"), qa: QA }) },
   { id: "game-villager-peek", title: "質問タイム（村人・押して見ている）", expect: "game", screen: "game", peek: true, room: playing({ magic: true, magicCards: CARDS, qa: QA }) },
   { id: "game-danger", title: "質問タイム（残り10秒以内）", expect: "game", screen: "game", room: playing({ startTime: ago(293), qa: QA }) },
@@ -76,7 +77,7 @@ export const SCENES = [
     lastDelta: { てこ: -1, やま: -2, うみ: -1, そら: -1 }, scores: { てこ: 2, もも: 5, やま: -2, うみ: 1, そら: -2 } }) },
   { id: "result-peace", title: "結果：平和村", expect: "result", room: playing({ phase: "result", scored: true, outcome: "peace_win", isPeaceVillage: true, peace: true, insiderEnc: null, wordGuessed: true,
     votes: { me1: NONE_ID, p2: NONE_ID, p3: NONE_ID, p4: "p3", p5: NONE_ID }, lastDelta: { てこ: 1, もも: 1, やま: 1, うみ: 1, そら: 1 }, scores: { てこ: 4, もも: 6, やま: 1, うみ: 3, そら: 0 } }) },
-  { id: "result-magic", title: "結果：魔術師の勝利（マジカル）", expect: "result", room: playing({ phase: "result", scored: true, outcome: "magic_wizard", magic: true, wordGuessed: true,
+  { id: "result-magic", title: "結果：魔術師の勝利（マジカル）", expect: "result", room: playing({ phase: "result", scored: true, outcome: "magic_wizard", magic: true, wordGuessed: true, magicCards: CARDS,
     votes: { p2: "p3" }, lastDelta: { もも: 3 }, scores: { てこ: 3, もも: 8, やま: 0, うみ: 2, そら: -1 } }) },
   // ── ワードウルフ ──
   { id: "wolf-reveal", title: "ウルフ：お題を見る前", expect: "sub", room: wolf(["p4"]) },
