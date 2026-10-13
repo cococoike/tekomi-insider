@@ -571,7 +571,7 @@ export default function TekomiInsider({ shot = null }) {
         {isHost && room?.adult && (
           <Panel head="エロ度（このラウンド）" icon="chili" headStyle={{ background: "linear-gradient(180deg,#e29bff,#a020e0)", color: "#fff" }}>
             <Seg items={ADULT_LEVELS} value={room.adultLevel ?? "mix"} onChange={setAdultLevel} />
-            <div className="panel-note center" style={{ marginTop: 8 }}>ほんのり＝恋愛・ドキッ／きわどい＝体・下着・夜の店／どエロ＝行為・プレイ</div>
+            <div className="panel-note center" style={{ marginTop: 8 }}>ほんのり＝下着・体・夜の店／きわどい＝行為・プレイ／どエロ＝その一段上</div>
           </Panel>
         )}
 

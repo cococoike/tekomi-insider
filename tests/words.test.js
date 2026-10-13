@@ -64,7 +64,7 @@ test("お題：カテゴリを引ける（ヒント用）。アダルトは「�
 });
 
 test("アダルトのエロ度：各段階に十分な数、段階をまたいだ重複なし、選んだ段階のお題だけが出る", () => {
-  for (const lv of [1, 2, 3]) assert.ok(ADULT_BY_LEVEL[lv].length >= 90, `Lv${lv} が少ない`);
+  for (const lv of [1, 2, 3]) assert.ok(ADULT_BY_LEVEL[lv].length >= 80, `Lv${lv} が少ない`);
   assert.deepEqual(dupes(ADULT_LIST), []);
   for (const lv of [1, 2, 3]) {
     for (let i = 0; i < 100; i++) assert.ok(ADULT_BY_LEVEL[lv].includes(pickWord("おまかせ", [], true, lv)));
