@@ -71,6 +71,7 @@ export function JammerLobby({ room, isHost, onStart, err, busy }) {
 // ── ゲーム本体（phase: playing[step: answer → fake → pick] → result）──
 export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRound, openLb }) {
   const [ans, setAns] = useState("");
+  const [myQ, setMyQ] = useState(""); // ダスモンが自分で書く質問
   const [f1, setF1] = useState("");
   const [f2, setF2] = useState("");
   const [sel, setSel] = useState(null);
@@ -144,6 +145,14 @@ export function JammerGame({ room, myId, isHost, lb, onHome, onAbort, onNextRoun
         {hdr()}
         {roleBar("ダスモンが答えを書いてる")}
         {qCard}
+        {amDasmon && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <input className="mp-input" style={{ marginBottom: 0, flex: 1 }} placeholder="質問を自分で書いてもOK（40文字まで）" value={myQ} maxLength={40}
+              autoComplete="off" onChange={(e) => setMyQ(e.target.value)} />
+            <button className="btn btn-cream btn-sm" style={{ width: "auto", padding: "0 14px", marginBottom: 0 }} disabled={!myQ.trim() || busy}
+              onClick={() => { const q = myQ.trim().slice(0, 40); run(() => updateRoom(ROOM, { "jam/q": q, "jam/pts": 2 })); setMyQ(""); }}>変える</button>
+          </div>
+        )}
         {amDasmon ? (
           <Panel head="本当の答え（ジャマーだけが見る）" icon="pencil">
             <input className="mp-input" placeholder="本当の答え（20文字まで）" value={ans} maxLength={20} enterKeyHint="done"

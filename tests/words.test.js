@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   WORD_LIST, ADULT_LIST, MAGIC_CARDS, WOLF_PAIRS, WOLF_PAIRS_ADULT, JAMMER_QUESTIONS, JAMMER_QUESTIONS_ADULT,
-  pickWord, pickWolfPair, pickJammerQuestion, dealMagicCards, categoryOf,
+  pickWord, pickWolfPair, pickJammerQuestion, dealMagicCards, categoryOf, ADULT_BY_LEVEL, WOLF_PAIRS_ADULT_BY_LEVEL,
 } from "../src/lib/words.js";
 
 const dupes = (arr) => arr.filter((x, i) => arr.indexOf(x) !== i);
@@ -61,4 +61,20 @@ test("お題：カテゴリを引ける（ヒント用）。アダルトは「�
   assert.equal(categoryOf("そんな語は無い"), null);
   // 2つのカテゴリにある語（将棋＝モノ・エンタメ など）は、どちらかが返ればよい
   for (const list of Object.values(WORD_LIST)) for (const w of list) assert.ok(WORD_LIST[categoryOf(w)]?.includes(w), `${w} のカテゴリが引けない`);
+});
+
+test("アダルトのエロ度：各段階に十分な数、段階をまたいだ重複なし、選んだ段階のお題だけが出る", () => {
+  for (const lv of [1, 2, 3]) assert.ok(ADULT_BY_LEVEL[lv].length >= 90, `Lv${lv} が少ない`);
+  assert.deepEqual(dupes(ADULT_LIST), []);
+  for (const lv of [1, 2, 3]) {
+    for (let i = 0; i < 100; i++) assert.ok(ADULT_BY_LEVEL[lv].includes(pickWord("おまかせ", [], true, lv)));
+    for (let i = 0; i < 30; i++) {
+      const [a, b] = pickWolfPair([], true, lv);
+      assert.ok(WOLF_PAIRS_ADULT_BY_LEVEL[lv].some((p) => p.includes(a) && p.includes(b)));
+    }
+  }
+  for (let i = 0; i < 200; i++) assert.ok(ADULT_LIST.includes(pickWord("おまかせ", [], true, "mix")));
+  // ジャマーは選んだエロ度「以下」の質問だけが混ざる
+  for (let i = 0; i < 300; i++) { const q = pickJammerQuestion([], true, 1); assert.ok(!q.lv || q.lv <= 1); }
+  assert.ok(JAMMER_QUESTIONS_ADULT.every((q) => [1, 2, 3].includes(q.lv)));
 });

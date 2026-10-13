@@ -6,6 +6,7 @@ import { finalizeRound } from "../lib/scoring";
 import { ROOM, dec, computeFlair, topVote, scorerOf, TAKEOVER_MS } from "../lib/util";
 import { wolfCount, wolvesOf, wolfLeft, tallyWolf, scoreWolf } from "../lib/rules";
 import { GAMES } from "../lib/roles";
+import { adultLevelLabel } from "../lib/words";
 import { useNow, useAction, buzz } from "../lib/hooks";
 import { sfxReveal, sfxVote } from "../lib/sound";
 import { ShotCtx } from "../lib/shotctx";
@@ -43,7 +44,7 @@ export function WolfLobby({ room, isHost, onStart, err, busy }) {
           <ErrBox>{err}</ErrBox>
         </>
       ) : (
-        <div className="note-bar note-dark"><Icon name="wolf" size={24} />部屋主のスタートを待つてこ（話し合い {dur / 60}分・ウルフ {wolfCount(n, room?.wolfN)}人{room?.adult ? "・アダルト" : ""}）</div>
+        <div className="note-bar note-dark"><Icon name="wolf" size={24} />部屋主のスタートを待つてこ（話し合い {dur / 60}分・ウルフ {wolfCount(n, room?.wolfN)}人{room?.adult ? `・アダルト（${adultLevelLabel(room.adultLevel)}）` : ""}）</div>
       )}
       <Fold head="ワードウルフのルール" icon="wolf" open={(room?.round || 1) === 1} headStyle={{ background: "linear-gradient(180deg,#8fb3ff,#5b8def)" }}>
         <div className="gd-grid">

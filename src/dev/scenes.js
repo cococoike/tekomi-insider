@@ -40,6 +40,7 @@ export const SCENES = [
   { id: "guide-opts", title: "あそびかた：オプション", expect: "tutorial", screen: "tutorial", guideTab: "opts" },
   // ── ロビー ──
   { id: "lobby-host", title: "ロビー（部屋主・マスター・3ラウンド目＝設定はたたんである）", expect: "lobby", host: true, room: room({ wordEnc: W("ハンバーガー"), follower: true }) },
+  { id: "lobby-adult", title: "ロビー（アダルト・エロ度を選ぶ）", expect: "lobby", host: true, room: room({ adult: true, adultLevel: 2 }) },
   { id: "lobby-host-first", title: "ロビー（部屋主・1ラウンド目＝設定が開いている）", expect: "lobby", host: true, room: room({ round: 1, scores: {} }) },
   { id: "lobby-guest", title: "ロビー（参加者）", expect: "lobby", room: room({ hostId: "p2", masterId: "p3" }) },
   { id: "lobby-magic", title: "ロビー（マジカル・部屋主）", expect: "lobby", host: true, room: room({ magic: true, masterId: "p4" }) },

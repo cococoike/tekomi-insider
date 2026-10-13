@@ -5,7 +5,7 @@ import { wolfCount, jammerRoles } from "./rules.js";
 
 export function startWolfRound(room, now = Date.now()) {
   const players = room.players || [];
-  const [maj, min] = pickWolfPair(room.usedPairs || [], !!room.adult);
+  const [maj, min] = pickWolfPair(room.usedPairs || [], !!room.adult, room.adultLevel);
   const wolves = shuffle(players).slice(0, wolfCount(players.length, room.wolfN)).map((p) => p.id);
   const dur = room.wolfDuration || 180;
   return {
@@ -18,7 +18,7 @@ export function startWolfRound(room, now = Date.now()) {
 
 export function startJammerRound(room) {
   const { dasmon, jammer } = jammerRoles(room);
-  const card = pickJammerQuestion(room.usedQuestions || [], !!room.adult);
+  const card = pickJammerQuestion(room.usedQuestions || [], !!room.adult, room.adultLevel);
   return {
     ...room, phase: "playing", votes: null, scored: false, outcome: null, lastDelta: null,
     usedQuestions: [...(room.usedQuestions || []), card.q].slice(-200),

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useContext } from "react";
 import { subscribeRoom, saveRoom, setRoomField, updateRoom, loadRoom, transactRoom, loadLeaderboard, saveLeaderboard } from "./lib/db";
-import { pickWord, dealMagicCards, categoryOf } from "./lib/words";
+import { pickWord, dealMagicCards, categoryOf, ADULT_LEVELS, adultLevelLabel } from "./lib/words";
 import { sfxClick, sfxCorrect, sfxDrumroll, sfxResult, sfxReveal, sfxVote } from "./lib/sound";
 import { finalizeRound } from "./lib/scoring";
 import { genId, ROOM, NONE_ID, enc, dec, computeFlair, scorerOf, TAKEOVER_MS, topVote, sanitizeName } from "./lib/util";
@@ -67,7 +67,7 @@ const optsSummary = (r) => {
   const on = [];
   if (r?.magic) on.push("マジカル");
   if (r?.peace && !r?.magic) on.push("平和村");
-  if (r?.adult) on.push("アダルト");
+  if (r?.adult) on.push(`アダルト（${adultLevelLabel(r.adultLevel)}）`);
   if (r?.follower && !r?.magic) on.push("フォロワー");
   if (r?.hint) on.push("ヒント");
   return on.length ? on.join("＋") : "ふつう";
@@ -133,6 +133,7 @@ export default function TekomiInsider({ shot = null }) {
   const [slow, setSlow] = useState(false); // 読み込みが長引いている
   const [lb, setLb] = useState(null);
   const [cat, setCat] = useState("おまかせ");
+  const [customWord, setCustomWord] = useState(""); // マスターが自分で書くお題
   const [gateOpen, setGateOpen] = useState(null); // null=読込中
   const [hostUnlocked, setHostUnlocked] = useState(() => device.get("tekomi_host") === "1");
   const [soundOn, toggleSound] = useSound();
@@ -344,6 +345,15 @@ export default function TekomiInsider({ shot = null }) {
     const w = pickWord(cat, room?.usedWords || [], !!room?.adult);
     updateRoom(ROOM, { wordEnc: enc(w), wordCat: categoryOf(w) }); // wordCat は「カテゴリ公開」のヒント用（秘密ではない）
   };
+  // 自由お題：マスターが好きなお題を書く（ヒントのカテゴリは「自由お題」）
+  const doCustomWord = () => {
+    const w = customWord.trim().replace(/\s+/g, " ").slice(0, 20);
+    if (!w) return;
+    run(() => updateRoom(ROOM, { wordEnc: enc(w), wordCat: "自由お題" }));
+    setCustomWord("");
+  };
+  // エロ度（部屋主がラウンドごとに選ぶ）。語彙が変わるので、引いたお題は引き直し
+  const setAdultLevel = (lv) => updateRoom(ROOM, { adultLevel: lv, ...(game === "insider" ? { wordEnc: null } : {}) });
   // どの操作も run() を通す：押している間は busy、8秒返ってこなければ「電波を確かめて」と出る
   const doStart = async () => {
     const res = await run(() => transactRoom(ROOM, (cur) => startInsider(cur, { deal: dealMagicCards })));
@@ -500,8 +510,8 @@ export default function TekomiInsider({ shot = null }) {
     const summary = game === "insider"
       ? `${G.short}・${optsSummary(room)}・${(room?.duration || 300) / 60}分・${MASTER_RULES.find((r) => r.k === rule)?.label || ""}`
       : game === "wordwolf"
-        ? `${G.short}・話し合い${(room?.wolfDuration || 180) / 60}分${room?.adult ? "・アダルト" : ""}`
-        : `${G.short}${room?.adult ? "・アダルト" : ""}`;
+        ? `${G.short}・話し合い${(room?.wolfDuration || 180) / 60}分${room?.adult ? `・アダルト（${adultLevelLabel(room.adultLevel)}）` : ""}`
+        : `${G.short}${room?.adult ? `・アダルト（${adultLevelLabel(room.adultLevel)}）` : ""}`;
     return (
       <Shell>
         <Header title={G.label} icon={G.icon} sub={`ROUND ${round}`} onHome={doLeave} />
@@ -531,9 +541,15 @@ export default function TekomiInsider({ shot = null }) {
           <>
             <Panel head={`お題をきめる（あなたが${who}）`} icon={magic ? "wizard" : "mic"}>
               {room?.adult
-                ? <div className="panel-note center" style={{ color: "#8a1fc2", marginBottom: 10 }}>アダルト専用のお題から出るてこ（カテゴリは選べない）</div>
+                ? <div className="panel-note center" style={{ color: "#8a1fc2", marginBottom: 10 }}>アダルト（{adultLevelLabel(room.adultLevel)}）のお題から出るてこ</div>
                 : <div className="chips">{CATS.map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div>}
               <button className="btn btn-cream btn-sm" onClick={doGenWord}><Icon name="dice" size={24} />{wordSet ? "お題を引き直す" : "お題をひく"}</button>
+              <div className="label">または、自分でお題を書く（まわりに見せない）</div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <input className="mp-input" style={{ marginBottom: 0, flex: 1 }} placeholder="好きなお題（20文字まで）" value={customWord} maxLength={20}
+                  enterKeyHint="done" autoComplete="off" onChange={(e) => setCustomWord(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") doCustomWord(); }} />
+                <button className="btn btn-gold btn-sm" style={{ width: "auto", padding: "0 14px", marginBottom: 0 }} onClick={doCustomWord} disabled={!customWord.trim() || busy}>決定</button>
+              </div>
               {wordSet && (
                 <Secret label="引いたお題" hint="押しているあいだだけ見える（まわりに見せない）">
                   <div className="center" style={{ fontSize: 26, color: "#c62828" }}>「{dec(room.wordEnc)}」</div>
@@ -550,6 +566,14 @@ export default function TekomiInsider({ shot = null }) {
         ))}
         {game === "wordwolf" && <WolfLobby room={room} isHost={isHost} onStart={doStartSub} err={err} busy={busy} />}
         {game === "jammer" && <JammerLobby room={room} isHost={isHost} onStart={doStartSub} err={err} busy={busy} />}
+
+        {/* ── エロ度（部屋主・アダルトONのとき）。ラウンドごとに変えるので、たたまずに出しておく ── */}
+        {isHost && room?.adult && (
+          <Panel head="エロ度（このラウンド）" icon="chili" headStyle={{ background: "linear-gradient(180deg,#e29bff,#a020e0)", color: "#fff" }}>
+            <Seg items={ADULT_LEVELS} value={room.adultLevel ?? "mix"} onChange={setAdultLevel} />
+            <div className="panel-note center" style={{ marginTop: 8 }}>ほんのり＝恋愛・ドキッ／きわどい＝体・下着・夜の店／どエロ＝行為・プレイ</div>
+          </Panel>
+        )}
 
         {/* ── ゲームと設定（部屋主）。1ラウンド目は開いておき、2ラウンド目からは閉じて要約だけ ── */}
         {isHost && (
